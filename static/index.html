@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LanceDB — Memory Graph</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="app">
+  <!-- ═══ Nav ═══ -->
+  <div id="nav">
+    <div id="nav-header">◆ LanceDB</div>
+    <div class="nav-item active" data-page="dashboard" onclick="switchPage('dashboard')">
+      <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h4v4H2zM10 4h4v4h-4zM2 10h4v4H2zM10 10h4v4h-4z"/></svg></span><span>Dashboard</span>
+    </div>
+    <div class="nav-item" data-page="memories" onclick="switchPage('memories')">
+      <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 4h10M3 8h10M3 12h7"/></svg></span><span>Memories</span>
+    </div>
+    <div class="nav-item" data-page="timeline" onclick="switchPage('timeline')">
+      <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="12" height="11" rx="1.5"/><path d="M2 7h12"/><path d="M5 1v3M11 1v3"/></svg></span><span>Timeline</span>
+    </div>
+    <div class="nav-item" data-page="tags" onclick="switchPage('tags')">
+      <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 2l5 1v10l-5 1z"/><path d="M7 3h6v10H7"/><circle cx="5" cy="8.5" r=".8" fill="currentColor"/></svg></span><span>Tags</span>
+    </div>
+    <div class="nav-item" data-page="duplicates" onclick="switchPage('duplicates')">
+      <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="3" width="10" height="10" rx="1"/><rect x="5" y="1" width="10" height="10" rx="1"/></svg></span><span>Duplicates</span>
+    </div>
+    <div class="nav-item" data-page="embedding" onclick="switchPage('embedding')">
+      <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="5" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="8" cy="9" r="1.5"/><circle cx="3" cy="12" r="1.5"/><circle cx="12" cy="11" r="1.5"/></svg></span><span>Embeddings</span>
+    </div>
+    <div class="nav-item" data-page="clusters" onclick="switchPage('clusters')">
+      <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="5" cy="5" r="3"/><circle cx="11" cy="6" r="2.5"/><circle cx="7" cy="12" r="2.5"/></svg></span><span>Clusters</span>
+    </div>
+    <div class="nav-item" data-page="stale" onclick="switchPage('stale')">
+      <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 2.5"/></svg></span><span>Stale</span>
+    </div>
+    <div class="nav-item" data-page="graph" onclick="switchPage('graph')">
+      <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="4" r="1.5"/><circle cx="12" cy="4" r="1.5"/><circle cx="8" cy="12" r="1.5"/><path d="M4 5.5v0M5.5 4h5M9.5 11L12 5.5M4 5.5L6.5 11"/></svg></span><span>Graph</span>
+    </div>
+  </div>
+
+  <!-- ═══ Main area ═══ -->
+  <div id="main-area">
+    <div id="topbar">
+      <h1>LanceDB <span>Memory Explorer</span></h1>
+      <div class="stats">
+        <span>Memories <b id="mem-count">--</b></span>
+        <span>Entities <b id="ent-count">--</b></span>
+        <span>Edges <b id="edge-count">--</b></span>
+        <span id="db-size"></span>
+        <span id="fresh-legend" style="display:none;">
+          <span title="< 1h"><span class="dot dot-f0"></span>1h</span>
+          <span title="1h - 24h"><span class="dot dot-f1"></span>1d</span>
+          <span title="1d - 7d"><span class="dot dot-f2"></span>1w</span>
+          <span title="7d - 30d"><span class="dot dot-f3"></span>1m</span>
+          <span title="> 30d"><span class="dot dot-f4"></span>old</span>
+        </span>
+        <button class="btn-neon btn-neon-export" onclick="exportMemories()">Export</button>
+        <button class="btn-neon btn-neon-import" onclick="importMemories()">Import</button>
+        <input type="file" id="import-file" accept=".json" style="display:none;" onchange="handleImportFile(this)" />
+      </div>
+    </div>
+
+    <div id="content">
+      <!-- ═══ Dashboard ═══ -->
+      <div id="page-dashboard" class="page active">
+        <div class="page-inner">
+          <div class="section-header"><h2>Dashboard</h2></div>
+          <div class="stats-grid" id="dash-stats"></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+            <div class="card"><div class="card-title">By Category</div><div id="dash-categories" class="bar-chart"></div></div>
+            <div class="card"><div class="card-title">By Tier</div><div id="dash-tiers" class="bar-chart"></div></div>
+            <div class="card"><div class="card-title">Top Tags</div><div id="dash-tags" class="bar-chart"></div></div>
+            <div class="card"><div class="card-title">Top Accessed</div><div id="dash-accessed"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ Memories ═══ -->
+      <div id="page-memories" class="page">
+        <div class="page-inner">
+          <div class="section-header"><h2>Memories</h2></div>
+          <div class="filter-bar">
+            <input type="text" id="mem-search" placeholder="Search text..." oninput="loadMemories()">
+            <select id="mem-category" onchange="loadMemories()">
+              <option value="">All</option>
+              <option value="fact">Facts</option><option value="tech">Tech</option>
+              <option value="project">Projects</option><option value="correction">Corrections</option>
+              <option value="user_pref">Preferences</option>
+              <option value="decision">Decisions</option><option value="insight">Insights</option>
+              <option value="reference">References</option><option value="pattern">Patterns</option><option value="question">Questions</option>
+            </select>
+            <label>Tier <select id="mem-tier" onchange="loadMemories()"><option value="">All</option><option value="1">T1</option><option value="2">T2</option><option value="3">T3</option></select></label>
+            <select id="mem-type" onchange="loadMemories()"><option value="">All types</option></select>
+            <button class="btn-neon btn-focus" onclick="loadMemories()">Filter</button>
+            <div class="bulk-bar" id="mem-bulk-bar">
+              <span class="bulk-count" id="mem-bulk-count">0 selected</span>
+              <button class="btn-neon btn-delete" onclick="bulkDeleteMemories()">Delete</button>
+            </div>
+          </div>
+          <div style="overflow-x:auto;"><table class="data-table" id="mem-table"><thead><tr>
+            <th class="cb-col"><input type="checkbox" id="mem-sel-all" onchange="toggleSelectAll()"></th>
+            <th>Content</th><th>Category</th><th>Tier</th><th>Tags</th><th>Quality</th><th>Created</th>
+          </tr></thead><tbody id="mem-tbody"></tbody></table></div>
+          <div class="pagination" id="mem-pagination"></div>
+        </div>
+      </div>
+
+      <!-- ═══ Timeline ═══ -->
+      <div id="page-timeline" class="page">
+        <div class="page-inner">
+          <div class="section-header"><h2>Timeline</h2><span class="sub" id="tl-count"></span></div>
+          <div class="filter-bar">
+            <select id="tl-category" onchange="loadTimeline()">
+              <option value="">All categories</option>
+              <option value="fact">Facts</option><option value="tech">Tech</option><option value="project">Projects</option><option value="correction">Corrections</option><option value="user_pref">Preferences</option>
+            </select>
+          </div>
+          <div id="tl-container"></div>
+        </div>
+      </div>
+
+      <!-- ═══ Tags ═══ -->
+      <div id="page-tags" class="page">
+        <div class="page-inner">
+          <div class="section-header"><h2>Tags</h2></div>
+          <div id="tags-container"></div>
+        </div>
+      </div>
+
+      <!-- ═══ Duplicates ═══ -->
+      <div id="page-duplicates" class="page">
+        <div class="page-inner">
+          <div class="section-header"><h2>Duplicates</h2></div>
+          <div class="filter-bar">
+            <label>Threshold <input type="range" id="dup-threshold" min="0.7" max="1" step="0.05" value="0.9" oninput="document.getElementById('dup-threshold-val').textContent=Math.round(this.value*100)+'%';loadDuplicates()">
+            <span id="dup-threshold-val" style="font-size:12px;color:var(--accent);font-weight:600;">90%</span></label>
+          </div>
+          <div id="dup-container"></div>
+        </div>
+      </div>
+
+      <!-- ═══ Embeddings ═══ -->
+      <div id="page-embedding" class="page">
+        <div class="page-inner">
+          <div class="section-header"><h2>Embedding Projection</h2><span class="sub" id="emb-count"></span></div>
+          <div class="filter-bar">
+            <label>Neighbors <input type="range" id="emb-neighbors" min="5" max="30" step="1" value="15" oninput="document.getElementById('emb-neighbors-val').textContent=this.value;loadEmbedding()">
+            <span id="emb-neighbors-val" style="font-size:12px;color:var(--accent);">15</span></label>
+            <label>Min dist <input type="range" id="emb-mindist" min="0.05" max="0.5" step="0.05" value="0.1" oninput="document.getElementById('emb-mindist-val').textContent=this.value;loadEmbedding()">
+            <span id="emb-mindist-val" style="font-size:12px;color:var(--accent);">0.1</span></label>
+          </div>
+          <div id="emb-legend" style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px;"></div>
+          <div class="scatter-container" id="emb-container">
+            <canvas id="emb-canvas"></canvas>
+            <div class="scatter-tooltip" id="emb-tooltip"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ═══ Clusters ═══ -->
+      <div id="page-clusters" class="page">
+        <div class="page-inner">
+          <div class="section-header"><h2>Semantic Clusters</h2><span class="sub" id="cl-count"></span></div>
+          <div class="filter-bar">
+            <label>Threshold <input type="range" id="cl-threshold" min="0.3" max="0.9" step="0.05" value="0.6" oninput="document.getElementById('cl-threshold-val').textContent=this.value;loadClusters()">
+            <span id="cl-threshold-val" style="font-size:12px;color:var(--accent);">0.6</span></label>
+            <label>Min size <input type="range" id="cl-minsize" min="2" max="10" step="1" value="2" oninput="document.getElementById('cl-minsize-val').textContent=this.value;loadClusters()">
+            <span id="cl-minsize-val" style="font-size:12px;color:var(--accent);">2</span></label>
+          </div>
+          <div id="cl-container"></div>
+        </div>
+      </div>
+
+      <!-- ═══ Stale ═══ -->
+      <div id="page-stale" class="page">
+        <div class="page-inner">
+          <div class="section-header"><h2>Stale Memories</h2></div>
+          <div class="filter-bar">
+            <label>Older than <input type="number" id="stale-days" value="90" min="7" max="999" style="width:60px;" onchange="loadStale()"> days</label>
+            <label>Max quality <input type="range" id="stale-quality" min="0" max="1" step="0.05" value="0.3" oninput="document.getElementById('stale-quality-val').textContent=this.value;loadStale()">
+            <span id="stale-quality-val" style="font-size:12px;color:var(--accent);">0.3</span></label>
+            <button class="btn-neon btn-delete" onclick="deleteAllStale()">Delete All</button>
+          </div>
+          <div id="stale-container"></div>
+        </div>
+      </div>
+
+      <!-- ═══ Graph ═══ -->
+      <div id="page-graph" class="page">
+        <div id="controls">
+          <input type="text" id="search" placeholder="Search memories or Enter for semantic..." />
+          <select id="cat-filter">
+            <option value="">All categories</option>
+            <option value="user_pref">Preferences</option>
+            <option value="project">Projects</option>
+            <option value="tech">Tech</option>
+            <option value="correction">Corrections</option>
+            <option value="fact">Facts</option>
+          </select>
+          <select id="cluster-mode">
+            <option value="raw">Raw links</option>
+            <option value="domain">Domain hubs</option>
+            <option value="entity">Entity clusters</option>
+          </select>
+          <label>Threshold
+            <input type="range" id="threshold-slider" min="0.3" max="1" step="0.05" value="0.8"
+              oninput="document.getElementById('threshold-val').textContent=this.value"
+              onchange="closeSidebar();loadGraph()">
+            <span id="threshold-val" style="color:var(--accent);font-weight:600;min-width:36px;">0.80</span>
+          </label>
+          <label><input type="checkbox" id="tier1" checked onchange="applyFilters()"> T1</label>
+          <label><input type="checkbox" id="tier2" checked onchange="applyFilters()"> T2</label>
+          <label><input type="checkbox" id="tier3" checked onchange="applyFilters()"> T3</label>
+          <button id="refresh-btn" class="btn-neon btn-neon-export">Refresh</button>
+        </div>
+        <div id="main">
+          <div id="graph-container">
+            <div id="loading">
+              <div class="spinner"></div>
+              <div>Building memory graph...</div>
+            </div>
+            <div id="search-panel"></div>
+            <div id="graph-canvas"></div>
+          </div>
+          <div id="sidebar">
+            <div id="sidebar-header">
+              <span id="sidebar-title">Details</span>
+              <button id="sidebar-close">x</button>
+            </div>
+            <div id="sidebar-content">
+              <div id="sidebar-empty">Click a node to see details</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/vis-network.min.js?2"></script>
+<script src="/static/graph.js"></script>
+<script src="/static/app.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,25 @@
+# Memory data — not committed
+lancedb/
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment
+.env
+.env.*
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Docker
+.dockerignore
