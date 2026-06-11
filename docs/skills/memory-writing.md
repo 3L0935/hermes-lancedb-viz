@@ -38,7 +38,7 @@ Domaine:Sujet Contexte autosuffisant. clé=valeur. [Tier=N]
 | Pas d'extension fichier (`.py`, `.yaml`) | Tue l'extraction d'entités |
 
 **Valide :**
-`Tech:Ollama Embeddings nomic-embed-text=768d keep_alive=30s. Poster dans #announcements. [Tier=1]`
+`Tech:Ollama Embeddings nomic-embed-text=768d keep_alive=30s. [Tier=1]`
 
 **Invalide :**
 `port=8846` (pas de Domaine:Sujet) · 3 lignes sans Tier (trop long)
@@ -100,6 +100,37 @@ Priorité si hésitation : `correction` > `pattern` > `decision` > `user_pref` >
 | **`lancedb_add()`** | Tout le reste : technique, bugs, fixes, chemins, commandes |
 
 Test : "c'est qui elo ?" → memory(). "Comment fix X ?" → LanceDB.
+
+## Search Context Enrichment — quality + relations au fetch
+
+Quand tu cherches, ne t'arrête pas aux résultats bruts du `lancedb_search()`.
+
+### 1. Quality-aware re-rank
+
+Le score retourné par `lancedb_search()` est cosine similarity pure. Les entrées avec qualité < 0.3 sont du bruit même avec un bon score.
+
+Filtrage post-search :
+1. Garder les résultats avec `quality >= 0.3`
+2. Re-rank : `score_final = cosine_score * 0.7 + quality * 0.3`
+3. Prendre le top 3-5
+
+### 2. Follow relations
+
+Chaque résultat peut avoir des `relations[]` et des `links[]`. Suis-les :
+
+1. Lire `relations[]` → `lancedb_search()` sur chaque cible (label matching)
+2. Lire `links[]` → si ce sont des IDs, ils pointent vers d'autres entrées directes
+3. Priorité : relations typées (depends, part_of) > links cosine (vague)
+4. Ajouter les contextes secondaires à ta réponse
+
+### 3. Workflow complet
+
+```
+1. lancedb_search("sujet") → top 5
+2. Quality re-rank : cos*0.7 + quality*0.3, garder top 3
+3. Pour chaque résultat, suivre les relations[] 1 niveau
+4. Synthétiser : résultat principal + contexte lié
+```
 
 ## Pitfalls
 

@@ -26,7 +26,11 @@ _SEARCH_SCHEMA = {
     "name": "lancedb_search",
     "description": (
         "Semantic search over stored vector memories. "
-        "Returns memories ranked by cosine similarity to your query. "
+        "Returns memories ranked by cosine similarity to your query, "
+        "each result includes a quality score (0-1, auto-calculated from "
+        "access frequency + links + freshness) and relations (typed links "
+        "to related memories). Follow relations of top results for "
+        "additional context. "
         "Use this before answering about the user's projects, preferences, "
         "or past decisions — avoids asking questions already stored."
     ),
@@ -206,6 +210,8 @@ class LanceDBMemoryProvider(MemoryProvider):
             f"# LanceDB Memory\n"
             f"Active. {count} memories stored with vector search and entity linking.\n"
             f"Use lancedb_search to recall context before answering.\n"
+            f"Each result includes quality (0-1, filter <0.3 as noise) and relations (typed links).\n"
+            f"Follow relations of top results for richer context.\n"
             f"Use lancedb_add to store new facts as they come up.\n"
             f"Use lancedb_graph to explore memory connections.\n"
         )
@@ -221,8 +227,13 @@ class LanceDBMemoryProvider(MemoryProvider):
             for r in results:
                 cat = r.get("category", "?")
                 score = r.get("score", 0)
+                quality = r.get("quality", 0.5) or 0.5
                 content = r.get("content", "")
-                lines.append(f"[{cat}] ({score:.2f}) {content}")
+                rels = r.get("relations", [])
+                rel_str = ""
+                if rels:
+                    rel_str = " →rels: " + ", ".join(f"{rel.get('type','?')}={rel.get('target','?')}" for rel in rels)
+                lines.append(f"[{cat}] ({score:.2f} q={quality:.2f}) {content}{rel_str}")
             return "## LanceDB Memory\n" + "\n".join(lines)
         except Exception as e:
             logger.debug("LanceDB prefetch failed: %s", e)
