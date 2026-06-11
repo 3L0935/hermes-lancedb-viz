@@ -38,7 +38,7 @@ Domaine:Sujet Contexte autosuffisant. clé=valeur. [Tier=N]
 | Pas d'extension fichier (`.py`, `.yaml`) | Tue l'extraction d'entités |
 
 **Valide :**
-`Profil:elo 21ans micro-entrepreneur BNC freelance Bodycam Reissad. Rôle=QA. [Tier=2]`
+`Tech:Ollama Embeddings nomic-embed-text=768d keep_alive=30s. Poster dans #announcements. [Tier=1]`
 
 **Invalide :**
 `port=8846` (pas de Domaine:Sujet) · 3 lignes sans Tier (trop long)

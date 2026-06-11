@@ -82,7 +82,7 @@ static/
 
 **⚠️ Pitfall: doublons `const` entre graph.js et app.js → JS mort.** `graph.js` definit `const catColors = {...}`, `const catLabels = {...}`, `const catColorsG`, `const defaultColorG`. Si `app.js` redefinit ces memes `const` dans le scope global (Script mode), le navigateur jette une `SyntaxError: Identifier 'X' has already been declared` et **TOUT le JS meurt** — dashboard vide, rien cliquable, zero message d'erreur dans l'UI. Ce bug est invisible sans ouvrir la console navigateur. **Fix:** `app.js` ne doit PAS redefinir `catColors`/`catLabels`/etc. Mettre un commentaire `// catColors and catLabels are defined in graph.js (loaded first)` a la place. Verifier avec `browser_console` apres deploy — si `console.error()` ou `js_errors` sont vides mais que le dashboard reste en "Loading...", c'est probablement ce bug.
 
-**⚠️ Pitfall: .bak = piège à régressions.** Les `.bak` sont un snapshot gelé qui ignore toutes les features et corrections ajoutées depuis sa création. S'en servir comme référence réintroduit des bugs déjà corrigés et supprime des features. La vraie source de vérité est le code qui tourne, pas un snapshot périmé. Si elo dit que le .bak est trop vieux, le supprimer immédiatement (ne pas insister). **Règle :** ne JAMAIS utiliser un .bak comme référence pour restaurer du code. Toujours utiliser `session_search` pour retrouver l'état exact du code à un moment donné.
+**⚠️ Pitfall: .bak = piège à régressions.** Les `.bak` sont un snapshot gelé qui ignore toutes les features et corrections ajoutées depuis sa création. S'en servir comme référence réintroduit des bugs déjà corrigés et supprime des features. La vraie source de vérité est le code qui tourne, pas un snapshot périmé. **Règle :** ne JAMAIS utiliser un .bak comme référence pour restaurer du code.
 
 ### Graph View (page Graph)
 Liens vectoriels cosine similarity.
@@ -447,22 +447,6 @@ curl -s http://localhost:7778/api/stats | python3 -m json.tool
 curl -s http://localhost:7778/api/graph | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'nodes={len(d.get("nodes",[]))} edges={len(d.get("edges",[]))}')"
 ```
 
-## Format des entrees
+## Format des entrées
 
-**-> Voir `memory-writing` skill.** Les regles de format (Domaine:Sujet, cle=valeur, [Tier=N], linking implicite, thresholds) sont la-bas. Pas de duplication ici.
-
-## GitHub Repo
-
-Le code source du viz est versionné sur `3L0935/hermes-lancedb-viz` (privé) dans `~/github/hermes-lancedb-viz/`. Les fichiers Docker, server, static et scripts y sont maintenus. **Les changements dans les bind mounts Docker ne sont pas automatiquement synchronisés avec le repo** — voir `references/repo-sync-workflow.md` pour le workflow de sync.
-
-## References (gardees)
-
-- `references/repo-sync-workflow.md` — structure du repo GitHub, sync workflow, pitfalls
-- `references/freshness-model.md`
-- `references/typed-edges-viz.md`
-- `references/lance-fork-warning-suppression.md`
-- `references/stats-race-condition-fix.md`
-- `references/reconstruction-pattern.md`
-- `references/entity-extraction-limits.md`
-
-Les autres references (entity-extraction, hub-lessons, vector-vs-entity-links, viz-physics, viz-ui) -> supprimees. Stale.
+**→ Voir `memory-writing` skill.** Les règles de format (Domaine:Sujet, clé=valeur, [Tier=N], linking implicite, thresholds) sont là-bas. Pas de duplication ici.
