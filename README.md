@@ -2,6 +2,12 @@
 
 > Visualiseur de mémoire vectorielle pour **Hermes Agent** — graphe de connaissances néon, timeline, tags, clusters, et plus.
 
+📚 Documentation détaillée :
+- **[Setup → docs/setup.md](docs/setup.md)** — Installer LanceDB + viz de zéro dans Hermes
+- **[Memory Writing Skill → docs/skills/memory-writing.md](docs/skills/memory-writing.md)** — Format canonique des mémoires
+- **[LanceDB System Skill → docs/skills/lancedb-memory-system.md](docs/skills/lancedb-memory-system.md)** — Architecture store, viz, déploiement
+- **[Plugin source → docs/plugin/](docs/plugin/)** — `store.py`, `__init__.py`, `plugin.yaml`
+
 ![screenshot](https://img.shields.io/badge/stack-LanceDB%20%2B%20Python%20%2B%20vis.js-blueviolet)
 
 ## Stack
@@ -26,6 +32,8 @@ hermes-lancedb-viz/server/server.py           ← HTTP API + static files
 - Docker (ou Python 3.11+ sur l'hôte)
 - Ollama avec `nomic-embed-text` installé
 - Hermes Agent avec un store LanceDB existant (`~/.hermes/lancedb/`)
+
+> **Pas encore configuré ?** Voir le **[guide d'installation complet → docs/setup.md](docs/setup.md)** qui couvre le plugin LanceDB, la config Hermes, Ollama, la DB, et le conteneur Docker.
 
 ### Docker (recommandé)
 
