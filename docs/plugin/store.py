@@ -49,6 +49,80 @@ def _is_valid_tag(tag: str) -> bool:
     return True
 
 
+# Words that pass _is_valid_tag but are still worthless as tags — French/English
+# generic words, adverbs, verbs, noise from code snippet extraction, etc.
+_TAG_NOISE_WORDS: set[str] = {
+    # French generics
+    "toujours", "jamais", "sans", "plus", "rien", "quand", "avant", "peut",
+    "chaque", "doit", "chez", "dans", "avec", "cette",
+    "couleurs", "contexte", "cible", "solution", "exact", "chercher",
+    "envoyer", "ajouter", "fixé", "fixe", "utilise", "connecte", "couvre",
+    "contenu", "priorite", "ancien", "nouveaux", "nouveau",
+    "discuter", "fonctionne", "accepter", "confirme", "prefere", "evite",
+    "adresse", "assigner", "exclure", "prendre",
+    "sarcasme", "obligatoire", "applicable", "creer", "simplifie",
+    "adapte", "cree", "reecrit", "modes", "recueil",
+    "analyse", "plusieurs", "ordre", "sujet", "sujets",
+    "pour", "trois", "ouvre", "titre", "pointage",
+    "verifier", "prerequis", "matche", "logique",
+    "dictionnaire", "raison", "chemin",
+    # English generics
+    "setup", "clean", "cleanup", "format", "gateway", "worker", "ghost",
+    "root", "magic", "pool", "purge", "poll", "mount", "certs",
+    "alldata", "register", "frontmatter", "tasks", "works", "types",
+    "default", "broad", "deal", "free", "better", "phase", "only",
+    "must", "deep", "object", "stop", "file",
+    "access", "score", "scoring", "drive", "sync", "links", "liens",
+    "query", "search", "profile", "button", "bouton", "boutons",
+    "prev", "next", "back", "home", "page", "list", "view",
+    "code", "data", "info", "text", "type", "name", "mode",
+    "button", "input", "field", "form", "value", "total",
+    "menu", "tab", "tag", "tags", "hover", "click",
+    "todo", "note", "notes", "book", "file", "files",
+    "left", "right", "top", "bottom", "item", "items",
+    "select", "delete", "update", "create", "read", "write",
+    "main", "base", "side", "open", "close", "show",
+    "account", "manage", "change", "added", "removed",
+    "server", "client", "local", "remote", "live", "beta",
+    "sample", "test", "demo", "prod",
+    "source", "target", "input", "output",
+    "check", "auto", "manual", "this", "docs", "script",
+}
+
+
+def _select_tags(entities: list[str]) -> list[str]:
+    """Pick curated tags from entities — tech keywords, project names, acronyms.
+    Filters out generic noise words (French/English adverbs, verbs, generic nouns).
+    Returns max 5 tags, prioritizing tech keywords then meaningful names.
+    """
+    project_re = re.compile(r'^[A-Z][a-z]+[A-Z]')  # Multi-Capital CamelCase
+    acro_re = re.compile(r'^[A-Z]{3,}$')            # ALL CAPS acronyms
+
+    scored = []
+    for e in entities:
+        if len(e) < 3:
+            continue
+        e_lower = e.lower()
+        if e_lower in _TAG_NOISE_WORDS:
+            continue
+
+        # Score: tech keywords highest, project names next, acronyms last
+        if e_lower in _TECH_KEYWORDS:
+            score = 3
+        elif project_re.match(e) and len(e) >= 5:
+            score = 2
+        elif acro_re.match(e):
+            score = 2
+        else:
+            score = 1  # keep it but lower priority
+
+        scored.append((score, e))
+
+    # Sort by score desc, then by length desc (longer = more specific)
+    scored.sort(key=lambda x: (-x[0], -len(x[1])))
+    return [e for _, e in scored[:5]]
+
+
 _STOP_ENTITIES: set[str] = {
     "projet", "projets", "game", "games", "plugin", "plugins",
     "dll", "framework", "cache", "build", "config", "tools",
@@ -428,9 +502,9 @@ class LanceDBStore:
 
         mem_type = type_ or category
 
-        # Auto-tags from entities (top 5 most significant)
+        # Auto-tags: curated from entities — tech keywords, project names, acronyms only
         safe_entities = [e for e in entities if _is_valid_tag(e)]
-        auto_tags = tags if tags is not None else [e for e in safe_entities if len(e) >= 3 and e not in _STOP_ENTITIES][:5]
+        auto_tags = tags if tags is not None else _select_tags(safe_entities)
 
         # Auto-quality: start at 0.5, adjust based on context
         auto_quality = quality if quality is not None else 0.5
