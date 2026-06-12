@@ -82,7 +82,7 @@ static/
 
 **⚠️ Pitfall: doublons `const` entre graph.js et app.js → JS mort.** `graph.js` definit `const catColors = {...}`, `const catLabels = {...}`, `const catColorsG`, `const defaultColorG`. Si `app.js` redefinit ces memes `const` dans le scope global (Script mode), le navigateur jette une `SyntaxError: Identifier 'X' has already been declared` et **TOUT le JS meurt** — dashboard vide, rien cliquable, zero message d'erreur dans l'UI. Ce bug est invisible sans ouvrir la console navigateur. **Fix:** `app.js` ne doit PAS redefinir `catColors`/`catLabels`/etc. Mettre un commentaire `// catColors and catLabels are defined in graph.js (loaded first)` a la place. Verifier avec `browser_console` apres deploy — si `console.error()` ou `js_errors` sont vides mais que le dashboard reste en "Loading...", c'est probablement ce bug.
 
-**⚠️ Pitfall: .bak = piège à régressions.** Les `.bak` sont un snapshot gelé qui ignore toutes les features et corrections ajoutées depuis sa création. S'en servir comme référence réintroduit des bugs déjà corrigés et supprime des features. La vraie source de vérité est le code qui tourne, pas un snapshot périmé. **Règle :** ne JAMAIS utiliser un .bak comme référence pour restaurer du code.
+**⚠️ Pitfall: .bak = piège à régressions.** Les `.bak` sont un snapshot gelé qui ignore toutes les features et corrections ajoutées depuis sa création. S'en servir comme référence réintroduit des bugs déjà corrigés et supprime des features. La vraie source de vérité est le code qui tourne, pas un snapshot périmé. Si elo dit que le .bak est trop vieux, le supprimer immédiatement (ne pas insister). **Règle :** ne JAMAIS utiliser un .bak comme référence pour restaurer du code. Toujours utiliser `session_search` pour retrouver l'état exact du code à un moment donné.
 
 ### Graph View (page Graph)
 Liens vectoriels cosine similarity.
@@ -243,6 +243,83 @@ La qualité est recalculée à chaque `get_by_id()` via `_compute_quality(memory
 | Fraîcheur | +0.1 / +0.05 | < 7 jours / < 30 jours |
 
 Base = 0.5, clampé [0.1, 1.0]. Recalculé dynamiquement à chaque fetch.
+
+## Search Context Enrichment — quality + relations au fetch
+
+Quand tu fais un `lancedb_search()`, ne t'arrête pas aux résultats bruts. Deux étapes pour enrichir :
+
+### 1. Quality-aware ranking
+
+Le score de `lancedb_search()` est cosine similarity pure. Les entrées avec qualité faible peuvent être du bruit, même avec un bon score.
+
+**Workflow :**
+
+```
+1. lancedb_search(query)
+2. Filtrer : garder les résultats avec quality >= 0.3 (en dessous c'est du bruit)
+3. Re-ranking simple : score_final = cosine_score * 0.7 + quality * 0.3
+4. Prendre le top 5 du re-ranking comme "best guesses"
+```
+
+Implémentation rapide (post-processing à la main, pas dans le moteur LanceDB) :
+
+```python
+results = lancedb_search("mon sujet")
+scored = []
+for r in results.get("results", []):
+    cos = r.get("score", 0)
+    qual = r.get("quality", 0.5) or 0.5
+    if qual < 0.3:
+        continue  # skip le bruit
+    scored.append((cos * 0.7 + qual * 0.3, r))
+ordered = [r for _, r in sorted(scored, key=lambda x: -x[0])]
+```
+
+**Pourquoi pas juste quality ?** La cosine similarity est plus discriminante sur le sujet exact. La qualité est un boost correctif — pas un remplacement.
+
+### 2. Relation-following — context traversal
+
+Les résultats du search peuvent avoir des `relations` et `links` vers d'autres entrées. Suis-les comme on le fait à l'écriture.
+
+**Workflow :**
+
+```
+1. lancedb_search(query) → top 3-5
+2. Pour chaque résultat, lire relations[] et links[]
+3. Si relations présent → lancedb_search() sur les cibles (label matching)
+4. Si links présent → IDs direct, fetch avec get_by_id()
+5. Enrichir la réponse avec les contextes secondaires
+```
+
+**Priorité relations > links** : les relations typées (depends, part_of) sont directionnelles et portent du sens. Un simple link cosine est bidirectionnel et moins informatif.
+
+### 3. Exemple complet
+
+```python
+# 1. Search + quality rerank
+results = lancedb_search("Ollama embedding")
+scored = []
+for r in results.get("results", []):
+    cos = r.get("score", 0)
+    qual = r.get("quality", 0.5) or 0.5
+    if qual < 0.3: continue
+    scored.append((cos * 0.7 + qual * 0.3, r))
+ordered = [r for _, r in sorted(scored, key=lambda x: -x[0])][:3]
+
+# 2. Follow relations
+context = []
+for r in ordered:
+    context.append(r)
+    for rel in (r.get("relations") or []):
+        # rel = {"type": "depends", "target": "Ollama"}
+        follow = lancedb_search(rel["target"])
+        context.extend(follow.get("results", [])[:2])
+
+# 3. Réponse enrichie avec tout le contexte
+# → plus de liens entre les infos, meilleure réponse
+```
+
+**Règle :** Toujours enrichir au moins 1 niveau de relations. Si le résultat principal parle de `depends=Ollama`, fetch la cible pour avoir le setup complet. Le silence sur un sujet = échec du proactif.
 
 ## API Response Pitfall
 
@@ -447,6 +524,22 @@ curl -s http://localhost:7778/api/stats | python3 -m json.tool
 curl -s http://localhost:7778/api/graph | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'nodes={len(d.get("nodes",[]))} edges={len(d.get("edges",[]))}')"
 ```
 
-## Format des entrées
+## Format des entrees
 
-**→ Voir `memory-writing` skill.** Les règles de format (Domaine:Sujet, clé=valeur, [Tier=N], linking implicite, thresholds) sont là-bas. Pas de duplication ici.
+**-> Voir `memory-writing` skill.** Les regles de format (Domaine:Sujet, cle=valeur, [Tier=N], linking implicite, thresholds) sont la-bas. Pas de duplication ici.
+
+## GitHub Repo
+
+Le code source du viz est versionné sur `3L0935/hermes-lancedb-viz` (privé) dans `~/github/hermes-lancedb-viz/`. Les fichiers Docker, server, static et scripts y sont maintenus. **Les changements dans les bind mounts Docker ne sont pas automatiquement synchronisés avec le repo** — voir `references/repo-sync-workflow.md` pour le workflow de sync.
+
+## References (gardees)
+
+- `references/repo-sync-workflow.md` — structure du repo GitHub, sync workflow, pitfalls
+- `references/freshness-model.md`
+- `references/typed-edges-viz.md`
+- `references/lance-fork-warning-suppression.md`
+- `references/stats-race-condition-fix.md`
+- `references/reconstruction-pattern.md`
+- `references/entity-extraction-limits.md`
+
+Les autres references (entity-extraction, hub-lessons, vector-vs-entity-links, viz-physics, viz-ui) -> supprimees. Stale.

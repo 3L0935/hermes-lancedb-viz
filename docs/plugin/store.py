@@ -663,15 +663,26 @@ class LanceDBStore:
         memories = self._get_all_raw()
         nodes = []
         for m in memories:
+            content = m["content"]
+            # Extract tier from content
+            tier = "none"
+            for t in ["1", "2", "3"]:
+                if f"[Tier={t}]" in content:
+                    tier = t
+                    break
             nodes.append({
                 "id": m["id"],
-                "label": m["content"][:30],
-                "content": m["content"],
+                "label": content[:30],
+                "content": content,
                 "category": m.get("category", "fact"),
                 "entities": m.get("entities", []),
                 "tags": m.get("tags", []),
                 "quality": m.get("quality", 0.5),
                 "type": m.get("type", m.get("category", "fact")),
+                "tier": tier,
+                "relations": m.get("relations", []),
+                "created_at": m.get("created_at"),
+                "access_count": m.get("access_count", 0),
             })
         edges = []
         for m in memories:

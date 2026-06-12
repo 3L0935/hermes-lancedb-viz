@@ -93,7 +93,8 @@ _GRAPH_SCHEMA = {
     "name": "lancedb_graph",
     "description": (
         "Export the full memory knowledge graph as nodes + edges. "
-        "Nodes represent individual memories with content, category, and entities. "
+        "Nodes represent individual memories with content, category, quality (0-1), "
+        "tier (1/2/3), tags, entities, and freshness (accessed_at). "
         "Edges represent entity-based links (2+ shared entities). "
         "Use this to understand how memories are connected."
     ),
@@ -116,6 +117,66 @@ _DELETE_SCHEMA = {
             },
         },
         "required": ["memory_id"],
+    },
+}
+
+_GET_SCHEMA = {
+    "name": "lancedb_get",
+    "description": (
+        "Get a single memory by its ID with all fields: "
+        "content, category, quality, tier, tags, entities, "
+        "relations (typed links to other memories), links (cosine-similar linked IDs), "
+        "access_count, created_at, updated_at. "
+        "Use after lancedb_search or lancedb_list to get full detail on a specific entry."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_id": {
+                "type": "string",
+                "description": "ID of the memory to retrieve.",
+            },
+        },
+        "required": ["memory_id"],
+    },
+}
+
+_LIST_SCHEMA = {
+    "name": "lancedb_list",
+    "description": (
+        "List all memories with optional filters. "
+        "Exact listing, no approximate search — use when you need every entry "
+        "of a category, or when search is too broad/narrow. "
+        "Returns content, category, quality, tier, tags, entities, "
+        "access_count for each memory."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "category": {
+                "type": "string",
+                "enum": ["", "project", "tech", "fact", "correction", "user_pref", "decision", "insight", "reference", "pattern", "question"],
+                "description": "Optional category filter (empty = all).",
+            },
+            "quality_min": {
+                "type": "number",
+                "description": "Minimum quality score (0-1). Default 0. Filters out noise.",
+            },
+            "tier": {
+                "type": "string",
+                "enum": ["", "1", "2", "3"],
+                "description": "Optional tier filter (1=critical, 2=useful, 3=contextual).",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max results (default: 50, max: 200).",
+            },
+            "offset": {
+                "type": "integer",
+                "description": "Pagination offset (default: 0).",
+            },
+        },
+        "required": [],
     },
 }
 
@@ -210,8 +271,11 @@ class LanceDBMemoryProvider(MemoryProvider):
             f"# LanceDB Memory\n"
             f"Active. {count} memories stored with vector search and entity linking.\n"
             f"Use lancedb_search to recall context before answering.\n"
-            f"Each result includes quality (0-1, filter <0.3 as noise) and relations (typed links).\n"
-            f"Follow relations of top results for richer context.\n"
+            f"  Each result includes quality (0-1, filter <0.3 as noise) and relations (typed links).\n"
+            f"  Follow relations of top results for richer context.\n"
+            f"Use lancedb_list to list ALL memories with filters (category, tier, quality_min).\n"
+            f"  No approximate search — use when you need every entry of a category.\n"
+            f"Use lancedb_get to get full detail on a single memory by ID (includes relations).\n"
             f"Use lancedb_add to store new facts as they come up.\n"
             f"Use lancedb_graph to explore memory connections.\n"
         )
@@ -245,7 +309,7 @@ class LanceDBMemoryProvider(MemoryProvider):
         pass
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [_SEARCH_SCHEMA, _ADD_SCHEMA, _GRAPH_SCHEMA, _DELETE_SCHEMA]
+        return [_SEARCH_SCHEMA, _ADD_SCHEMA, _GRAPH_SCHEMA, _DELETE_SCHEMA, _GET_SCHEMA, _LIST_SCHEMA]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if tool_name == "lancedb_search":
@@ -256,6 +320,10 @@ class LanceDBMemoryProvider(MemoryProvider):
             return self._handle_graph(args)
         elif tool_name == "lancedb_delete":
             return self._handle_delete(args)
+        elif tool_name == "lancedb_get":
+            return self._handle_get(args)
+        elif tool_name == "lancedb_list":
+            return self._handle_list(args)
         return tool_error(f"Unknown tool: {tool_name}")
 
     # -------------------------------------------------------------------
@@ -322,6 +390,73 @@ class LanceDBMemoryProvider(MemoryProvider):
                 "success": False,
                 "message": f"Memory {memory_id} not found.",
             })
+        except Exception as e:
+            return tool_error(str(e))
+
+    def _handle_get(self, args: dict) -> str:
+        memory_id = args.get("memory_id", "")
+        if not memory_id:
+            return tool_error("memory_id is required")
+        try:
+            mem = self._store.get_by_id(memory_id)
+            if not mem:
+                return json.dumps({"success": False, "message": f"Memory {memory_id} not found."})
+            # Parse tier from content
+            content = mem.get("content", "")
+            tier = "none"
+            for t in ["1", "2", "3"]:
+                if f"[Tier={t}]" in content:
+                    tier = t
+                    break
+            mem["tier"] = tier
+            return json.dumps(mem, ensure_ascii=False, default=str)
+        except Exception as e:
+            return tool_error(str(e))
+
+    def _handle_list(self, args: dict) -> str:
+        try:
+            category = args.get("category", "") or None
+            quality_min = float(args.get("quality_min", 0))
+            tier_filter = args.get("tier", "") or None
+            limit = min(int(args.get("limit", 50)), 200)
+            offset = int(args.get("offset", 0))
+
+            all_mems = self._store.get_all()
+
+            # Filter + enrich
+            results = []
+            for m in all_mems:
+                # Category filter
+                if category and m.get("category") != category:
+                    continue
+                # Quality filter
+                if quality_min > 0 and (m.get("quality") or 0) < quality_min:
+                    continue
+                # Tier filter
+                if tier_filter:
+                    content = m.get("content", "")
+                    if f"[Tier={tier_filter}]" not in content:
+                        continue
+                # Enrich with tier
+                content = m.get("content", "")
+                tier = "none"
+                for t in ["1", "2", "3"]:
+                    if f"[Tier={t}]" in content:
+                        tier = t
+                        break
+                m["tier"] = tier
+                results.append(m)
+
+            total = len(results)
+            page = results[offset:offset + limit]
+
+            return json.dumps({
+                "total": total,
+                "count": len(page),
+                "offset": offset,
+                "limit": limit,
+                "results": page,
+            }, ensure_ascii=False, default=str)
         except Exception as e:
             return tool_error(str(e))
 
