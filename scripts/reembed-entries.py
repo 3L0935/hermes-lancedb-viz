@@ -20,8 +20,8 @@ import sys
 import lancedb
 import requests
 
-DB_PATH = '/home/elo/.hermes/lancedb'
-OLLAMA_URL = 'http://localhost:11434/api/embed'
+DB_PATH = os.environ.get('HERMES_HOME', str(Path.home() / '.hermes' / 'lancedb'))
+OLLAMA_URL = os.environ.get('OLLAMA_HOST', 'http://localhost:11434') + '/api/embed'
 MODEL = 'nomic-embed-text'
 BATCH_SIZE = 10
 

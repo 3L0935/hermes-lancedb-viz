@@ -25,6 +25,30 @@ logger = logging.getLogger(__name__)
 EMBED_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434") + "/api/embed"
 EMBED_MODEL = os.environ.get("LANCE_EMBED_MODEL", "nomic-embed-text")
 
+# Regex patterns that disqualify an entity/tag — paths, key=value, special chars, etc
+_TAG_REJECT_PATTERNS = [
+    re.compile(r'[/\\]'),                     # path separators
+    re.compile(r'^~'),                        # starts with ~
+    re.compile(r'^\.'),                       # starts with .
+    re.compile(r'%[a-zA-Z]'),                 # %h, %u env-var patterns
+    re.compile(r'='),                         # key=value patterns
+    re.compile(r'[()[\]{}<>|&$!?*+@#^`~]'), # special chars
+    re.compile(r'[^\x00-\x7F]'),              # non-ASCII
+    re.compile(r'^[\d_\-.:]+$'),              # pure numbers/symbols
+    re.compile(r'\.(py|yaml|yml|toml|json|md|txt|cfg|ini|conf|sh|bash|fish|html|css|js|ts|vue|svelte|go|rs|cpp|c|h|hpp)$', re.IGNORECASE),  # file extensions
+]
+
+
+def _is_valid_tag(tag: str) -> bool:
+    """Reject tags that look like paths, key=value, or garbage patterns."""
+    if not isinstance(tag, str) or len(tag) < 2:
+        return False
+    for pat in _TAG_REJECT_PATTERNS:
+        if pat.search(tag):
+            return False
+    return True
+
+
 _STOP_ENTITIES: set[str] = {
     "projet", "projets", "game", "games", "plugin", "plugins",
     "dll", "framework", "cache", "build", "config", "tools",
@@ -145,7 +169,8 @@ def extract_entities(text: str) -> list[str]:
         if len(clean) >= 3 and clean.isalpha() and clean.isupper() and clean not in _STOP_ENTITIES:
             entities.add(clean)
 
-    return sorted(entities)
+    # Filter out tags that look like paths or garbage before returning
+    return sorted(e for e in entities if _is_valid_tag(e))
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +429,8 @@ class LanceDBStore:
         mem_type = type_ or category
 
         # Auto-tags from entities (top 5 most significant)
-        auto_tags = tags if tags is not None else [e for e in entities if len(e) >= 3 and e not in _STOP_ENTITIES][:5]
+        safe_entities = [e for e in entities if _is_valid_tag(e)]
+        auto_tags = tags if tags is not None else [e for e in safe_entities if len(e) >= 3 and e not in _STOP_ENTITIES][:5]
 
         # Auto-quality: start at 0.5, adjust based on context
         auto_quality = quality if quality is not None else 0.5

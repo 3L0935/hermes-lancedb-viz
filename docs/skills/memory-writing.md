@@ -99,7 +99,7 @@ Priorité si hésitation : `correction` > `pattern` > `decision` > `user_pref` >
 | **`memory()`** | Identité utilisateur, stack critique, conventions durables (~2200 chars) |
 | **`lancedb_add()`** | Tout le reste : technique, bugs, fixes, chemins, commandes |
 
-Test : "c'est qui elo ?" → memory(). "Comment fix X ?" → LanceDB.
+Test : "c'est qui l'utilisateur ?" → memory(). "Comment fixer X ?" → lancedb_add().
 
 ## Search Context Enrichment — quality + relations au fetch
 
