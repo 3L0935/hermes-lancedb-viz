@@ -198,14 +198,24 @@ class LanceDBStore:
     def _init_table(self):
         try:
             tbl = self._db.open_table(self._table_name)
-            # If it has the new schema columns, use it directly
             if "tags" in tbl.schema.names:
+                self._ensure_fts_index(tbl)
                 return tbl
-            # Old schema — warn but still use it (data is readable)
             logger.warning("Table has old schema — missing tags/quality/type")
             return tbl
         except Exception:
-            return self._db.create_table(self._table_name, schema=self._get_schema())
+            tbl = self._db.create_table(self._table_name, schema=self._get_schema())
+            self._ensure_fts_index(tbl)
+            return tbl
+
+    def _ensure_fts_index(self, tbl):
+        """Create FTS (BM25) index on content column for hybrid search.
+        Idempotent via replace=True — safe to call on every init."""
+        try:
+            tbl.create_fts_index("content", replace=True)
+            logger.info("FTS index ready on content column")
+        except Exception as e:
+            logger.debug("FTS index creation skipped: %s", e)
 
     def _compute_db_size(self) -> int:
         try:
@@ -618,18 +628,24 @@ class LanceDBStore:
     # -----------------------------------------------------------------------
 
     def search(self, query: str, top_k: int = 10, category: str | None = None) -> list[dict]:
-        """Semantic search using vector similarity."""
+        """Semantic search using vector + FTS hybrid (BM25).
+        Falls back to pure vector search if FTS index is unavailable.
+        
+        LanceDB 0.33 hybrid API: .search(query_type='hybrid').text(q).vector(v)"""
         vector = self._embed(query)
         try:
+            # Hybrid: vector + BM25 RRF fusion
+            base = (
+                self._table.search(query_type='hybrid')
+                .text(query)
+                .vector(vector.tolist())
+                .limit(top_k)
+            )
+
             if category:
-                results = (
-                    self._table.search(vector.tolist())
-                    .where(f"category = '{category}'")
-                    .limit(top_k)
-                    .to_list()
-                )
+                results = base.where(f"category = '{category}'").to_list()
             else:
-                results = self._table.search(vector.tolist()).limit(top_k).to_list()
+                results = base.to_list()
         except Exception as e:
             logger.error("Search failed: %s", e)
             return []
@@ -641,7 +657,7 @@ class LanceDBStore:
             mem = dict(r)
             mem.pop("vector", None)
             self._parse_json_fields(mem)
-            mem["score"] = 1.0 - mem.get("_distance", 0.0)
+            mem["score"] = r.get("_relevance_score", 1.0 - mem.get("_distance", 0.0))
             mem["accessed_at"] = now if mem.get("accessed_at") is None else mem["accessed_at"]
             memories.append(mem)
             ids_to_touch.append(mem["id"])

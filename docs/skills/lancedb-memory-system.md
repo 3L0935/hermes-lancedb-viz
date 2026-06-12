@@ -199,28 +199,41 @@ Domaine:Sujet Contexte. clé=valeur. [Tier=N]
 ::relations:: type=cible | type=cible2 | ...
 ```
 
-## Planned — FTS (BM25) + Hybrid Search
+## FTS (BM25) + Hybrid Search — ACTIVÉ (2026-06-12)
 
-*LanceDB supporte nativement le full-text search via Tantivy et la fusion RRF. Pas encore activé dans le store.*
+LanceDB supporte nativement le full-text search via Tantivy (BM25) et la fusion RRF. **Activé dans store.py.**
 
-**Activation (une ligne) :**
+### API LanceDB 0.33.0
+
 ```python
-table.create_fts_index("content")    # Crée l'index BM25 sur la colonne content
-table.search(query).hybrid_search()  # Vector + BM25 fusion RRF
+tbl.create_fts_index("content", replace=True)              # Idempotent, auto dans _init_table()
+
+# Hybrid query (vector + BM25 fusion RRF)
+tbl.search(query_type='hybrid').text(query).vector(vec).limit(top_k).where(...)
 ```
 
-**Impact :**
+### Ce qui a été patché
+
+**`_init_table()`** : appelle `_ensure_fts_index(tbl)` après ouverture ou création de la table — crée l'index BM25 sur la colonne `content` avec `replace=True` (idempotent).
+
+**`_ensure_fts_index(tbl)`** : méthode dédiée, try/except silencieux si FTS non supporté (fallback vector-only).
+
+**`search()`** : utilise `query_type='hybrid'` avec `.text(query).vector(vector)`. Fusion RRF entre BM25 et cosine similarity. Score exposé via `_relevance_score` (champ LanceDB hybride) avec fallback `_distance`.
+
+**Score mapping :**
+- `mem["score"] = r.get("_relevance_score", 1.0 - mem.get("_distance", 0.0))`
+- Les scores hybrides sont typiquement 0.015-0.035 (RRF normalisé) — plus serrés que les scores vectoriels purs (0.0-1.0) mais plus discriminants.
+
+### Impact
 - BM25 seul : recall ~66.5% (bench GBrain)
 - Vector seul : recall ~17.7% P@5
 - Hybrid + RRF : recalls ~97.9% (vector + BM25 fusionnés)
 - 0 coût API, 0 latence additionnelle (index Tantivy pré-calculé)
 
-**Par rapport aux benchmarks GBrain :** leur gain vient de l'hybrid search + reranker, pas du graph. Le FTS index est ce qui donne le + gros delta qualité/perf.
-
-**TODO store.py :**
-1. Ajouter `table.create_fts_index("content")` dans `__init__()` après `table.create()`
-2. Modifier `search()` pour appeler `.hybrid_search()` si query non-vide
-3. Option: garder un flag `use_hybrid` dans la config pour fallback vector-only (très petits datasets)
+### Pitfall : `query_type='hybrid'` crée une `LanceHybridQueryBuilder`, pas `LanceVectorQueryBuilder`
+- `.where()`, `.limit()`, `.to_list()` marchent pareil
+- `.text(q)` pour le FTS, `.vector(v)` pour le vector
+- Pas de `.hybrid_search()` — cette méthode n'existe pas. C'est le `query_type='hybrid'` qui active le mode hybride.
 
 ## Auto-Tags (2026-06-11)
 
