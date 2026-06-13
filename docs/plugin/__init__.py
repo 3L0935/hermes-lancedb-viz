@@ -61,7 +61,10 @@ _ADD_SCHEMA = {
         "Store a durable fact in LanceDB vector memory. "
         "Auto-extracts entities and builds links to related memories. "
         "Use for project details, user preferences, tech stack, bugs, "
-        "decisions — anything you'll want to recall later."
+        "decisions — anything you'll want to recall later.\n\n"
+        "PREFERRED: use domain + subject + content + tier (structured fields). "
+        "The handler assembles 'Domain:Subject info [Tier=N]' automatically.\n"
+        "LEGACY: pass a single 'content' string — must include Domain:Subject prefix and [Tier=N] suffix."
     ),
     "parameters": {
         "type": "object",
@@ -69,23 +72,31 @@ _ADD_SCHEMA = {
             "content": {
                 "type": "string",
                 "description": (
-                    "The fact to store. Format: 'Domaine:Sujet clé=valeur clé=valeur'. "
-                    "Examples:\n"
-                    "  Hermes:Service TTS Provider=piper Voice=fr_fr-glados-medium\n"
-                    "  Projet:BloodReaver BepInEx=6.0.0 Unity=6000.0.59f2\n"
-                    "  User:Prefs Shell=fish Editor=zed Terminal=alacritty\n"
-                    "  Tech:GPU AMD=7900XT VRAM=24GB Protocol=Wayland\n"
-                    "  Correction:Bug-123 LK-SSH Fix=utf8.decode Root=octets-traités-individuellement\n"
-                    "Format libre aussi accepté mais le format Domaine:Sujet améliore le clustering."
+                    "Fact details (keys and values). "
+                    "PREFERRED: omit this and use domain+subject+content+tier instead — the handler builds the full string. "
+                    "LEGACY only: pass the full string 'Domain:Subject key=value key=value. [Tier=N]' — must include the prefix and tier marker."
                 ),
+            },
+            "domain": {
+                "type": "string",
+                "description": "Domain namespace for clustering (e.g. Hermes, Projet, Tech, User, Correction, Fact, Config). Forms the 'Domain:' prefix.",
+            },
+            "subject": {
+                "type": "string",
+                "description": "Specific subject within the domain (e.g. Service, Profile, GPU, Pipeline). Forms ':Subject' suffix — combined with domain to form 'Domain:Subject' key.",
+            },
+            "tier": {
+                "type": "string",
+                "enum": ["1", "2", "3"],
+                "description": "Importance tier: 1=critical (bugs, corrections, commands), 2=useful (stack, URLs, archi), 3=contextual (notes de fond). REQUIRED when using domain+subject.",
             },
             "category": {
                 "type": "string",
                 "enum": ["project", "tech", "fact", "correction", "user_pref", "decision", "insight", "reference", "pattern", "question"],
-                "description": "Category for grouping in the graph (default: 'fact').",
+                "description": "Category for grouping in the graph (default: 'fact'). Priority order: correction > pattern > decision > user_pref > reference > insight > project > tech > fact > question. Pick the highest applicable.",
             },
         },
-        "required": ["content"],
+        "required": [],  # Use EITHER content (legacy) OR domain+subject+tier (+ optional content)
     },
 }
 
@@ -346,9 +357,29 @@ class LanceDBMemoryProvider(MemoryProvider):
 
     def _handle_add(self, args: dict) -> str:
         content = args.get("content", "")
+        domain = args.get("domain", "")
+        subject = args.get("subject", "")
+        tier = args.get("tier", "")
         category = args.get("category", "fact")
-        if not content.strip():
-            return tool_error("content is required")
+
+        # Mode 1: structured fields — assemble Domain:Subject key=value [Tier=N]
+        if domain or subject or tier:
+            if not domain:
+                return tool_error("domain is required when using structured fields")
+            if not subject:
+                return tool_error("subject is required when using structured fields")
+            if not tier:
+                return tool_error("tier is required when using structured fields (1=critical, 2=useful, 3=contextual)")
+
+            content = f"{domain}:{subject}"
+            if content_body := args.get("content", "").strip():
+                content += f" {content_body}"
+            content += f" [Tier={tier}]"
+        # Mode 2: legacy — use content as-is
+        else:
+            if not content.strip():
+                return tool_error("content is required (use EITHER 'content' alone OR 'domain+subject+tier+content')")
+
         # Validate category against enum
         VALID_CATEGORIES = {"project", "tech", "fact", "correction", "user_pref", "decision", "insight", "reference", "pattern", "question"}
         if category not in VALID_CATEGORIES:
@@ -358,7 +389,7 @@ class LanceDBMemoryProvider(MemoryProvider):
             return json.dumps({
                 "success": True,
                 "memory_id": mem_id,
-                "message": f"Memory stored: {content[:60]}...",
+                "message": f"Memory stored: {content[:80]}...",
             }, ensure_ascii=False)
         except Exception as e:
             return tool_error(str(e))
