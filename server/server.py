@@ -246,10 +246,14 @@ def get_graph_data(cluster: str = "raw", threshold: float = 0.65) -> dict:
     """Read memories from LanceDB and format as graph.
 
     cluster='domain': vector links + community hubs (✦ prefix)
-    cluster='entity': vector links + community hubs (◆ prefix)
+    cluster='entity': vector links + community hubs (◆ prefix)  
     cluster='raw' (default): pure vector links, no hubs
     threshold: cosine similarity threshold (0.0-1.0, default 0.65)
+
+    Resets the store singleton so every graph load reflects latest DB writes
+    without requiring a container restart.
     """
+    _reset_store()
     try:
         from plugins.memory.lancedb.store import LanceDBStore
     except ImportError:
@@ -280,7 +284,7 @@ def get_graph_data(cluster: str = "raw", threshold: float = 0.65) -> dict:
 
 def _compute_vector_data(store, threshold: float = 0.65) -> tuple:
     """Compute vector similarity data shared by all graph modes.
-
+    
     Returns (nodes, edges, nodes_by_id, sim_matrix, memories_list, threshold)
     where edges are REAL cosine similarity links from the vector store.
     All 3 graph modes use this as their base.
@@ -338,7 +342,7 @@ def _compute_vector_data(store, threshold: float = 0.65) -> tuple:
 
     threshold = threshold
     sim_matrix = None
-
+    
     if vectors:
         vec_matrix = np.array(vectors, dtype=np.float32)
         sim_matrix = np.dot(vec_matrix, vec_matrix.T)
@@ -363,17 +367,17 @@ def _compute_vector_data(store, threshold: float = 0.65) -> tuple:
 
 def _find_vector_communities(sim_matrix, memories, threshold: float = 0.65):
     """Find communities in the similarity graph using label propagation.
-
+    
     Returns dict of {community_label: [node_ids]} for communities with 3+ members.
     Communities are natural clusters of vector-similar memories.
-
+    
     The threshold parameter is used to build the adjacency graph — two nodes
     are connected if their cosine similarity >= threshold. Higher thresholds
     produce smaller, tighter communities.
     """
     if sim_matrix is None or not memories:
         return {}
-
+    
     n = len(memories)
     # Build adjacency: nodes are connected if similarity >= threshold
     adj = {i: set() for i in range(n)}
@@ -382,7 +386,7 @@ def _find_vector_communities(sim_matrix, memories, threshold: float = 0.65):
             if float(sim_matrix[i][j]) >= threshold:
                 adj[i].add(j)
                 adj[j].add(i)
-
+    
     # Label propagation
     labels = list(range(n))
     changed = True
@@ -409,20 +413,20 @@ def _find_vector_communities(sim_matrix, memories, threshold: float = 0.65):
             if labels[i] != best_label:
                 labels[i] = best_label
                 changed = True
-
+    
     # Group by final label
     groups = {}
     for i, lbl in enumerate(labels):
         if lbl not in groups:
             groups[lbl] = []
         groups[lbl].append(memories[i])
-
+    
     # Only return communities with 3+ members
     communities = {}
     for lbl, ids in groups.items():
         if len(ids) >= 3:
             communities[lbl] = ids
-
+    
     return communities
 
 
@@ -434,7 +438,7 @@ def _build_raw_graph(store, threshold: float = 0.65) -> dict:
 
 def _build_category_hub_graph(store, threshold: float = 0.65) -> dict:
     """Vector links + category-based hubs (tech, correction, fact, project, etc.)
-
+    
     Groups nodes by their DB category field, not by label prefix.
     Creates one hub per active category with the category's neon color.
     """
@@ -510,7 +514,7 @@ def _build_category_hub_graph(store, threshold: float = 0.65) -> dict:
 
 def _build_entity_clustered_graph(store, threshold: float = 0.65) -> dict:
     """Vector links + entity-based hubs for readability.
-
+    
     Groups nodes by their most representative entities (from extract_entities
     in the DB). Shows which real entities dominate the memory graph.
     Same vector edges as raw mode.
@@ -1223,6 +1227,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(api_get_stale(days, quality_max))
         elif path == "/api/dashboard":
             self._send_json(api_get_dashboard())
+        elif path == "/api/refresh":
+            _reset_store()
+            self._send_json({"status": "ok"})
 
         # --- /api/memories/:id GET (detail) ---
         else:

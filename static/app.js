@@ -37,6 +37,28 @@ function updateTopStats() {
   }).catch(() => {});
 }
 
+// Refresh store singleton then reload current page
+function refreshData() {
+  const btn = document.querySelector('.btn-neon-refresh');
+  if (btn) btn.textContent = '⟳';
+  fetch('/api/refresh', {method: 'GET'})
+    .then(r => r.json())
+    .then(() => {
+      if (currentPage === 'dashboard') loadDashboard();
+      else if (currentPage === 'memories') loadMemories();
+      else if (currentPage === 'timeline') loadTimeline();
+      else if (currentPage === 'tags') loadTags();
+      else if (currentPage === 'duplicates') loadDuplicates();
+      else if (currentPage === 'embedding') loadEmbedding();
+      else if (currentPage === 'clusters') loadClusters();
+      else if (currentPage === 'stale') loadStale();
+      else if (currentPage === 'graph' && typeof loadGraph === 'function') loadGraph();
+      updateTopStats();
+    })
+    .catch(e => console.error('Refresh failed:', e))
+    .finally(() => { if (btn) setTimeout(() => btn.textContent = '↻', 800); });
+}
+
 function catBadge(cat) {
   return '<span class="cat-badge cat-' + (cat || 'fact') + '">' + (colorLabel[cat] || cat || 'Fact') + '</span>';
 }
