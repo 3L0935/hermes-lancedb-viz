@@ -14,10 +14,10 @@ services:
       - ~/.hermes/lancedb:/home/hermes/.hermes/lancedb:rw
       # Hermes agent code (ro — imports LanceDBStore)
       - ~/.hermes/hermes-agent:/home/hermes/.hermes/hermes-agent:ro
-      # Static files (ro — HTML/JS/CSS served to browser)
-      - ~/.hermes/lancedb-viz/static:/app/static:ro
-      # Server script (ro)
-      - ~/.hermes/lancedb-viz/server.py:/app/server.py:ro
+      # Static files from repo (ro — HTML/JS/CSS served to browser)
+      - ./static:/app/static:ro
+      # Server script from repo (ro)
+      - ./server/server.py:/app/server.py:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:7777/')\" || exit 1"]
       interval: 30s
