@@ -1,0 +1,73 @@
+# Contributing
+
+## Setup
+
+```bash
+git clone https://github.com/3L0935/hermes-lancedb-viz.git
+cd hermes-lancedb-viz
+```
+
+You need Hermes Agent, Ollama, and Docker. See [docs/setup.md](docs/setup.md) for the full guide.
+
+## Project structure
+
+```
+plugin/          LanceDB memory provider (store.py, __init__.py, plugin.yaml)
+server/          Viz backend (Python HTTP server)
+static/          Viz frontend (vanilla JS SPA: app.js, graph.js, index.html, style.css)
+scripts/         Utils (reembed, auto-merge duplicates, verify setup, docker-run)
+docs/            Setup guide + skill references
+```
+
+## Making changes
+
+### Plugin (store.py, __init__.py)
+
+The plugin runs inside Hermes' venv. Test imports after any change:
+
+```bash
+cd ~/.hermes/hermes-agent
+venv/bin/python -c "from plugins.memory.lancedb import LanceDBMemoryProvider; print('OK')"
+```
+
+### Visualizer (server/ + static/)
+
+The viz runs in Docker with bind-mounts. After changes:
+
+- `static/` files (HTML/CSS/JS): instant, just refresh the browser
+- `server/server.py`: `docker restart lancedb-viz`
+
+### Frontend pitfalls
+
+The SPA is split across 4 files. Two rules to avoid silent JS deaths:
+
+1. **Never duplicate `const` declarations** between `graph.js` and `app.js`. If `catColors` is declared in `graph.js`, don't redeclare it in `app.js` — the browser throws `SyntaxError: Identifier has already been declared` and ALL JS dies silently.
+2. **Any function using `await` must be `async function`**. Missing `async` kills the entire script with no visible error in the UI.
+
+### Scripts
+
+Test scripts against your local DB before committing:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/python3 scripts/reembed-entries.py --dry-run
+python3 scripts/auto-merge-duplicates.py --threshold 0.92
+```
+
+## Commit style
+
+```
+type: concise subject line
+
+Types: fix, feat, refactor, docs, chore
+```
+
+## Before pushing
+
+1. `docker restart lancedb-viz` — verify the viz still loads
+2. `curl -s http://localhost:7777/api/stats | python3 -m json.tool` — API responds
+3. `./scripts/verify-setup.sh` — smoke test passes
+4. No personal references (paths, usernames, project names) in docs or code comments
+
+## License
+
+By contributing, you agree your changes are licensed under MIT.
