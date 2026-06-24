@@ -1,20 +1,21 @@
 # Hermes LanceDB Memory — Plugin + Visualizer
 
-Local-first vector memory for [Hermes Agent](https://github.com/nousresearch/hermes-agent). 
-SQLite-free, LanceDB-only storage with Ollama embeddings, entity extraction, 
+Local-first vector memory for [Hermes Agent](https://github.com/nousresearch/hermes-agent).
+SQLite-free, LanceDB-only storage with Ollama embeddings, entity extraction,
 hybrid search (BM25 + vector), and an interactive web dashboard.
 
 ## What this is
 
 A complete memory system for Hermes Agent that persists across sessions:
 
-- **Plugin** (`plugin/`) — LanceDB memory provider for Hermes. 7 MCP tools: 
-  search, add, update, delete, get, list, graph. Auto entity extraction, 
+- **Plugin** (`plugin/`) — LanceDB memory provider for Hermes. 7 MCP tools:
+  search, add, update, delete, get, list, graph. Auto entity extraction,
   auto-tagging, quality scoring with decay curve, typed relations, hybrid search.
-- **Visualizer** (`server/` + `static/`) — Docker-hosted web UI on port 7777. 
-  10 pages: Dashboard, Memories, Timeline, Tags, Duplicates, Embeddings (UMAP), 
+- **Visualizer** (`server/` + `static/`) — Docker-hosted web UI on port 7777.
+  10 pages: Dashboard, Memories, Timeline, Tags, Duplicates, Embeddings (UMAP),
   Clusters, Stale, Graph (vis-network). Neon OLED theme.
 - **Scripts** (`scripts/`) — Re-embedding, auto-merge duplicates, verification.
+- **Docs** (`docs/`) — Setup guide, skill reference for memory writing.
 
 ## Architecture
 
@@ -27,7 +28,7 @@ A complete memory system for Hermes Agent that persists across sessions:
 **Data flow:**
 
 ```
-Agent → MCP tools (lancedb_search, lancedb_add, lancedb_update, ...) 
+Agent → MCP tools (lancedb_search, lancedb_add, lancedb_update, ...)
   → LanceDBStore (store.py)
     → LanceDB table (memories + vectors)
     → Ollama /api/embed (nomic-embed-text, 768-dim)
@@ -44,37 +45,29 @@ Agent → MCP tools (lancedb_search, lancedb_add, lancedb_update, ...)
 - **Python 3.11+** with `lancedb`, `pyarrow`, `httpx`, `numpy`
 - **Docker** (for the visualizer only)
 
-## Setup
+## Quick Start
 
 ### 1. Install Ollama + embedding model
 
 ```bash
-# Install Ollama (if not already)
 curl -fsSL https://ollama.com/install.sh | sh
-
-# Pull the embedding model
 ollama pull nomic-embed-text
 ```
 
 ### 2. Install the plugin
 
-Copy the plugin files to Hermes plugins directory:
-
 ```bash
+mkdir -p ~/.hermes/hermes-agent/plugins/memory/lancedb/
 cp plugin/store.py plugin/__init__.py plugin/plugin.yaml \
    ~/.hermes/hermes-agent/plugins/memory/lancedb/
-```
 
-Install Python dependencies in Hermes venv:
-
-```bash
 cd ~/.hermes/hermes-agent
 venv/bin/pip install lancedb pyarrow httpx numpy
 ```
 
 ### 3. Configure Hermes
 
-In `~/.hermes/config.yaml`, add:
+In `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
@@ -84,15 +77,24 @@ memory:
     embed_model: nomic-embed-text
 ```
 
+Restart Hermes:
+
+```bash
+systemctl --user restart hermes-gateway
+hermes tools | grep lancedb
+```
+
 ### 4. Deploy the visualizer (optional)
 
 ```bash
-cd ~/github/hermes-lancedb-viz
+cd hermes-lancedb-viz
 docker build -t lancedb-viz:local .
 docker compose up -d
 ```
 
-The dashboard runs on `http://localhost:7777`.
+Dashboard: `http://localhost:7777`
+
+For the full setup guide, see [docs/setup.md](docs/setup.md).
 
 ## MCP Tools
 
@@ -102,9 +104,9 @@ The plugin exposes 7 tools to the Hermes agent:
 |------|---------|
 | `lancedb_search` | Hybrid search (BM25 + vector + RRF fusion). Returns ranked results with quality score and relations. |
 | `lancedb_add` | Store a new memory. Structured fields (domain, subject, tier, category) or legacy content string. Auto-extracts entities, auto-tags, builds links. |
-| `lancedb_update` | Edit an existing memory in-place by ID. Updates content (re-embeds), category, tags, quality, or type. Prefer over delete+recreate. |
+| `lancedb_update` | Edit an existing memory in-place by ID. Updates content (re-embeds), category, tags, quality, or type. |
 | `lancedb_delete` | Delete a memory by ID. Rebuilds remaining links. |
-| `lancedb_get` | Get a single memory by ID with all fields (content, category, quality, tier, tags, entities, relations, links). |
+| `lancedb_get` | Get a single memory by ID with all fields. |
 | `lancedb_list` | List all memories with filters (category, tier, quality_min). No approximate search — exact listing. |
 | `lancedb_graph` | Export the full memory knowledge graph as nodes + edges. |
 
@@ -115,11 +117,13 @@ Domain:Subject key=value key=value. [Tier=N]
 ::relations:: type=target | type=target2
 ```
 
-- **Domain**: Namespace (Hermes, Projet, Tech, User, Correction, Config, etc.)
+- **Domain**: Namespace (Hermes, Project, Tech, User, Correction, Config, etc.)
 - **Subject**: Specific subject within the domain
 - **Tier**: 1=critical (bugs, corrections), 2=useful (stack, URLs), 3=contextual
 - **Category**: project, tech, fact, correction, user_pref, decision, insight, reference, pattern, question
 - **Relations**: Optional typed links (part_of, depends, requires, runs_on, connects_to, uses, extends)
+
+See [docs/skills/memory-writing.md](docs/skills/memory-writing.md) for the full writing guide.
 
 ### Quality score
 
@@ -127,7 +131,7 @@ Dynamic score (0-1) computed at each access:
 
 | Factor | Effect |
 |--------|--------|
-| Access frequency | +0.1 to +0.2 (≥2/≥5/≥10 accesses) |
+| Access frequency | +0.1 to +0.2 (>=2/>=5/>=10 accesses) |
 | Entity links | +0.05 per link (max +0.15) |
 | Creation freshness | +0.1 (<7d) / +0.05 (<30d) |
 | **Decay curve** | **0.985^days since last access** (~50% after 46d, ~25% after 93d) |
@@ -136,25 +140,25 @@ Stale memories drop toward 0.1 but never hit 0. Re-accessing a memory resets the
 
 ### Auto-tagging
 
-Tags are auto-extracted from entities at write time via `_select_tags()`:
+Tags are auto-extracted from entities at write time:
 
 | Score | Type | Examples |
 |-------|------|----------|
 | 3 | Known tech keywords | hermes, docker, python, godot, steam |
-| 2 | CamelCase projects / ALL CAPS acronyms | BloodReaver, SpawnDirector, VIGIL |
+| 2 | CamelCase projects / ALL CAPS acronyms | BloodReaver, VIGIL |
 | 1 | Other non-blocked words | kept if space available |
 
-A noise filter (~140+ words) blocks generic FR/EN words (verbs, adverbs, common nouns).
+A noise filter (~140+ words) blocks generic FR/EN words.
 
 ### Hybrid search
 
-LanceDB 0.33+ native hybrid: BM25 (Tantivy FTS) + vector cosine, fused via Reciprocal Rank Fusion (RRF). 
-Precision gate filters results with RRF score < 0.005 (noise threshold). 
-Recall: ~97.9% (vector + BM25 combined) vs 66.5% BM25-only vs 17.7% vector-only.
+LanceDB 0.33+ native hybrid: BM25 (Tantivy FTS) + vector cosine, fused via Reciprocal Rank Fusion (RRF).
+Precision gate filters results with RRF score < 0.005.
+Recall: ~97.9% (hybrid) vs 66.5% BM25-only vs 17.7% vector-only.
 
 ## Visualizer
 
-Docker container with:
+Docker container with 10 pages:
 
 - **Dashboard** — total memories, category breakdown, tier distribution, top accessed
 - **Memories** — paginated list (20/page) with filters (category, type, tag, quality, date, search)
@@ -164,7 +168,7 @@ Docker container with:
 - **Embeddings** — UMAP 2D projection of all memory vectors
 - **Clusters** — semantic clusters (threshold + min size controls)
 - **Stale** — old + low-quality memories (cleanup candidates)
-- **Graph** — vis-network entity graph with freshness halo, tier filtering, typed edges, ghost mode
+- **Graph** — vis-network entity graph with freshness halo, tier filtering, typed edges
 
 ### API endpoints
 
@@ -173,19 +177,19 @@ GET  /api/dashboard          — enriched stats
 GET  /api/memories           — paginated + filtered list
 GET  /api/tags               — all tags with counts
 GET  /api/timeline           — memories by day
-GET  /api/duplicates          — duplicate groups (threshold param)
-GET  /api/projection          — UMAP 2D projection
-GET  /api/clusters            — semantic clusters
-GET  /api/stale               — stale memories
-GET  /api/graph               — full graph (nodes + edges + typed_edges)
-GET  /api/stats               — raw stats
-POST /api/memories/:id        — update memory
+GET  /api/duplicates         — duplicate groups (threshold param)
+GET  /api/projection         — UMAP 2D projection
+GET  /api/clusters           — semantic clusters
+GET  /api/stale              — stale memories
+GET  /api/graph              — full graph (nodes + edges + typed_edges)
+GET  /api/stats              — raw stats
+POST /api/memories/:id       — update memory
 POST /api/memories/:id/access — increment access count
 POST /api/memories/bulk-delete
 POST /api/memories/bulk-tag
 POST /api/memories/bulk-type
 POST /api/tags/rename | delete | merge
-GET  /api/refresh             — reset store singleton
+GET  /api/refresh            — reset store singleton
 POST /api/export | import
 ```
 
@@ -193,7 +197,7 @@ POST /api/export | import
 
 ### reembed-entries.py
 
-Re-embed all entries after batch content modifications (>5 entries). 
+Re-embed all entries after batch content modifications (>5 entries).
 Ollama must be running.
 
 ```bash
@@ -230,17 +234,14 @@ services:
     ports:
       - "7777:7777"
     volumes:
-      - ~/.hermes/lancedb:/home/hermes/.hermes/lancedb
+      - ~/.hermes/lancedb:/home/hermes/.hermes/lancedb:rw
       - ~/.hermes/hermes-agent:/home/hermes/.hermes/hermes-agent:ro
-      - ./server:/app/server:ro
       - ./static:/app/static:ro
+      - ./server/server.py:/app/server.py:ro
     command: python3 server/server.py --port 7777 --host 0.0.0.0
     restart: unless-stopped
 ```
 
-Bind-mounts: the DB, Hermes plugin code, and viz files are mounted read-only 
-(except the DB which needs write access for the refresh endpoint).
-
 ## License
 
-Private project. Not for redistribution.
+MIT — see [LICENSE](LICENSE).

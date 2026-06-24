@@ -1,7 +1,7 @@
 ---
 name: memory-writing
-description: "Format d'écriture LanceDB — semi-structuré, tiers, built-in vs LanceDB, workflow."
-version: 2.0.0
+description: "How to write memories: format, tiers, categories, relations."
+version: 3.0.0
 triggers:
   - "memory add"
   - "lancedb_add"
@@ -9,135 +9,93 @@ triggers:
   - "write memory"
 ---
 
-# Memory Writing — Format & Workflow
+# Memory Writing
 
-## RÈGLE — LOAD AVANT CHAQUE WRITE
+## Before writing
 
-`skill_view('memory-writing')` **avant chaque** `lancedb_add()`. Puis :
-
-1. `lancedb_search()` — vérifier duplicats ET entrées existantes à lier
-2. Formater avec `[Tier=N]` + `::relations::` si pertinent
-3. `lancedb_add(category=...)`
-
----
+1. `lancedb_search()` — check for duplicates and entries to link
+2. Format with `[Tier=N]` + optional `::relations::`
+3. `lancedb_add()`
 
 ## Format
 
 ```
-Domaine:Sujet Contexte autosuffisant. clé=valeur. [Tier=N]
-::relations:: type=cible | type=cible
+Domain:Subject Self-contained context. key=value. [Tier=N]
+::relations:: type=target | type=target2
 ```
 
-| Règle | Pourquoi |
-|-------|----------|
-| `Domaine:Sujet` en tête | Clustering par domaine |
-| Assez dense pour être comprise seule | Pas dépendre d'une autre entrée |
-| Pas besoin d'être une phrase correcte | Fragments OK |
-| `[Tier=N]` **toujours** | Oubli = invalide |
-| Max ~200 chars | Lisible en 2s |
-| Pas d'extension fichier (`.py`, `.yaml`) | Tue l'extraction d'entités |
-
-**Valide :**
-`Tech:Ollama Embeddings nomic-embed-text=768d keep_alive=30s. [Tier=1]`
-
-**Invalide :**
-`port=8846` (pas de Domaine:Sujet) · 3 lignes sans Tier (trop long)
+| Rule | Why |
+|------|-----|
+| `Domain:Subject` prefix | Clusters by domain |
+| Dense enough to stand alone | No dependency on other entries |
+| `[Tier=N]` always | Missing = invalid |
+| Max ~200 chars | Readable in 2s |
+| No file extensions (`.py`, `.yaml`) | Breaks entity extraction |
 
 ## Tiers
 
-| Tier | Quand |
-|------|-------|
-| **1** | Friction immédiate — bugs, corrections, commandes |
-| **2** | Utile récurrent — URLs, stack, architecture |
-| **3** | Contextuel — pourquoi, références |
+| Tier | When |
+|------|------|
+| 1 | Critical — bugs, corrections, commands |
+| 2 | Useful — URLs, stack, architecture |
+| 3 | Contextual — background, references |
 
-Prendre le plus bas.
+Pick the lowest that fits.
 
-## Linking implicite
+## Relations
 
-Les entrées se lient via cosine similarity. Pas besoin de `Related=ID`. Chaque entrée doit être autosuffisante + assez de shared terms pour matcher les voisines.
+`::relations:: type=target | type=target` after `[Tier=N]`.
 
-**Règle :** Jamais "Voir entrée X" — ça casse le graphe.
-
-## ::relations:: block
-
-`::relations:: type=cible | type=cible` **après** `[Tier=N]`.
-
-| Relation | Quand |
-|----------|-------|
-| `part_of` | Appartient à un projet existant |
-| `depends` | Utilise un outil/techno documenté |
-| `requires` | Techno nécessaire |
+| Relation | When |
+|----------|------|
+| `part_of` | Belongs to existing project |
+| `depends` | Uses a documented tool/tech |
+| `requires` | Tech required to function |
 | `runs_on` | OS/arch |
-| `connects_to` | Lien transverse |
-| `uses` | Consomme sans dépendance forte |
-| `extends` | Extension/spécialisation |
+| `connects_to` | Cross-link |
+| `uses` | Consumes without hard dependency |
+| `extends` | Extension/specialization |
 
-Stocké dans `memory_edges` pour le graphe. Vérifier que la cible existe dans la DB avant d'écrire.
+Verify the target exists in the DB before writing.
 
-## Catégories
+## Categories
 
-| Catégorie | Usage |
-|-----------|-------|
-| `correction` | Bugs, erreurs, fixes (priorité #1 si bug) |
-| `pattern` | Workflows récurrents, procédures |
-| `decision` | Décisions architecturales |
-| `user_pref` | Style, préférences |
-| `reference` | Liens, docs externes |
-| `insight` | Découvertes |
-| `project` | Contexte projet actif |
-| `tech` | Technique pure (ports, commandes) |
-| `fact` | Faits stables, architecture |
-| `question` | Questions ouvertes, todo |
+| Category | Use for |
+|----------|---------|
+| `correction` | Bugs, errors, fixes (priority #1 if bug) |
+| `pattern` | Recurring workflows, procedures |
+| `decision` | Architecture decisions |
+| `user_pref` | Style, preferences |
+| `reference` | Links, external docs |
+| `insight` | Discoveries |
+| `project` | Active project context |
+| `tech` | Pure technical (ports, commands) |
+| `fact` | Stable facts, architecture |
+| `question` | Open questions, todos |
 
-Priorité si hésitation : `correction` > `pattern` > `decision` > `user_pref` > `reference` > `insight` > `project` > `tech` > `fact` > `question`.
+Priority if unsure: `correction` > `pattern` > `decision` > `user_pref` > `reference` > `insight` > `project` > `tech` > `fact` > `question`.
 
-## memory() vs lancedb_add()
+## Updating memories
 
-| Destination | Contenu |
-|-------------|---------|
-| **`memory()`** | Identité utilisateur, stack critique, conventions durables (~2200 chars) |
-| **`lancedb_add()`** | Tout le reste : technique, bugs, fixes, chemins, commandes |
-
-Test : "c'est qui l'utilisateur ?" → memory(). "Comment fixer X ?" → lancedb_add().
-
-## Search Context Enrichment — quality + relations au fetch
-
-Quand tu cherches, ne t'arrête pas aux résultats bruts du `lancedb_search()`.
-
-### 1. Quality-aware re-rank
-
-Le score retourné par `lancedb_search()` est cosine similarity pure. Les entrées avec qualité < 0.3 sont du bruit même avec un bon score.
-
-Filtrage post-search :
-1. Garder les résultats avec `quality >= 0.3`
-2. Re-rank : `score_final = cosine_score * 0.7 + quality * 0.3`
-3. Prendre le top 3-5
-
-### 2. Follow relations
-
-Chaque résultat peut avoir des `relations[]` et des `links[]`. Suis-les :
-
-1. Lire `relations[]` → `lancedb_search()` sur chaque cible (label matching)
-2. Lire `links[]` → si ce sont des IDs, ils pointent vers d'autres entrées directes
-3. Priorité : relations typées (depends, part_of) > links cosine (vague)
-4. Ajouter les contextes secondaires à ta réponse
-
-### 3. Workflow complet
+Use `lancedb_update` to edit an existing memory in-place when its details change but its identity hasn't. Prefer this over delete + re-create — it preserves the UUID, links, and access history.
 
 ```
-1. lancedb_search("sujet") → top 5
-2. Quality re-rank : cos*0.7 + quality*0.3, garder top 3
-3. Pour chaque résultat, suivre les relations[] 1 niveau
-4. Synthétiser : résultat principal + contexte lié
+lancedb_update(memory_id, content="Domain:Subject new details. [Tier=N]")
+lancedb_update(memory_id, category="correction")
+lancedb_update(memory_id, tags=["python", "docker"])
 ```
+
+Updating `content` triggers a re-embed automatically. Other fields (category, tags, quality, type) don't.
+
+When to update vs create new:
+- **Update**: same fact, details changed (URL moved, version bumped, correction applied)
+- **Create new**: different fact, new subject, new domain
 
 ## Pitfalls
 
-- **Jamais de task progress** (PR #42, "Phase 3 done")
-- **Jamais omettre `[Tier=N]`**
-- **Jamais de paragraphes** — max 200 chars
-- **Toujours** `lancedb_search()` avant add
-- **Toujours** `lancedb_add()` pas `memory()` pour du technique
-- **Entités vides** : tokens avec `.`, `<`, `>`, `()`, `/` ne passent pas. Reformuler : `config.yaml` → `config yaml`, `get_enabled()` → `get_enabled`
-- **Batch > 5 modifs** → ré-embedding via `reembed-entries.py`
+- Never omit `[Tier=N]`
+- Never write paragraphs — max 200 chars
+- Always `lancedb_search()` before add — check for duplicates and entries to link
+- Prefer `lancedb_update` over delete + re-create when the memory's identity hasn't changed
+- Entities with `.`, `<`, `>`, `()`, `/` don't extract. Rephrase: `config.yaml` → `config yaml`
+- After batch > 5 edits → re-embed via `reembed-entries.py`

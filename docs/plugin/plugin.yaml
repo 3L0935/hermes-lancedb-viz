@@ -1,3 +1,0 @@
-name: lancedb
-version: 1.2.0
-description: "LanceDB vector memory — zero-footprint local memory with entity extraction, linking, Ollama embeddings, and interactive graph visualization."
