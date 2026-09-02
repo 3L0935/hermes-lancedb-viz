@@ -330,6 +330,18 @@ class LanceDBStore:
     # Relations (typed edges)
     # -----------------------------------------------------------------------
 
+    def _fresh(self) -> None:
+        """Re-sync the table handle to the latest version (MVCC).
+
+        Concurrent writers (gateway sessions, kanban workers, viz) each hold a
+        table handle pinned to the version it opened. A long-lived handle reads
+        a stale snapshot and commits (update/delete) that clobber newer writes.
+        Call before every read/write that goes through self._table."""
+        try:
+            self._table.checkout_latest()
+        except Exception:
+            self._table = self._init_table()
+
     def _parse_relations(self, content: str) -> list[dict]:
         """Parse ::relations:: block from content. Returns list of {type, target}.
         Uses the LAST occurrence of ::relations:: (usually after [Tier=N]) to avoid
@@ -485,6 +497,7 @@ class LanceDBStore:
             quality: float | None = None,
             type_: str | None = None) -> str:
         """Add a new memory. Extracts entities, embeds, links."""
+        self._fresh()
         from uuid import uuid4
         mem_id = str(uuid4())[:12]
 
@@ -541,6 +554,7 @@ class LanceDBStore:
 
     def update(self, memory_id: str, **kwargs) -> bool:
         """Update fields of a memory. Accepts: content, category, tags, quality, type, entities."""
+        self._fresh()
         try:
             existing = self._get_by_id_raw(memory_id)
             if not existing:
@@ -594,6 +608,7 @@ class LanceDBStore:
 
     def delete(self, memory_id: str) -> bool:
         """Delete a memory by ID."""
+        self._fresh()
         try:
             existing = self._table.search().where(f"id = '{memory_id}'").limit(1).to_list()
             if not existing:
@@ -608,6 +623,7 @@ class LanceDBStore:
 
     def bulk_delete(self, memory_ids: list[str]) -> dict:
         """Delete multiple memories. Returns {deleted: N, errors: [...]}."""
+        self._fresh()
         deleted = 0
         errors = []
         for mid in memory_ids:
@@ -657,6 +673,7 @@ class LanceDBStore:
 
     def get_by_id(self, memory_id: str) -> dict | None:
         """Get a memory by ID (vector removed)."""
+        self._fresh()
         try:
             result = self._table.search().where(f"id = '{memory_id}'").limit(1).to_list()
             if not result:
@@ -683,6 +700,7 @@ class LanceDBStore:
 
     def _get_by_id_raw(self, memory_id: str) -> dict | None:
         """Get a memory by ID INCLUDING vector (for similarity computation)."""
+        self._fresh()
         try:
             result = self._table.search().where(f"id = '{memory_id}'").limit(1).to_list()
             if not result:
@@ -695,6 +713,7 @@ class LanceDBStore:
 
     def _get_all_raw(self) -> list[dict]:
         """Get all memories WITH vectors."""
+        self._fresh()
         try:
             results = self._table.to_arrow()
             memories = []
@@ -718,6 +737,7 @@ class LanceDBStore:
         return memories
 
     def count(self) -> int:
+        self._fresh()
         try:
             return self._table.count_rows()
         except Exception:
@@ -745,8 +765,9 @@ class LanceDBStore:
     def search(self, query: str, top_k: int = 10, category: str | None = None) -> list[dict]:
         """Semantic search using vector + FTS hybrid (BM25).
         Falls back to pure vector search if FTS index is unavailable.
-        
+
         LanceDB 0.33 hybrid API: .search(query_type='hybrid').text(q).vector(v)"""
+        self._fresh()
         vector = self._embed(query)
         try:
             # Hybrid: vector + BM25 RRF fusion
@@ -795,6 +816,7 @@ class LanceDBStore:
 
     def graph(self) -> dict:
         """Return all memories as graph nodes + edges (entity-based links)."""
+        self._fresh()
         memories = self._get_all_raw()
         nodes = []
         for m in memories:
