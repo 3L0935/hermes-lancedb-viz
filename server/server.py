@@ -50,19 +50,37 @@ def _parse_entities(val):
 
 _store_instance = None
 
+def _import_store_module():
+    """Import the LanceDB store MODULE: canonical user copy first, runtime fallback.
+
+    ~/.hermes/plugins/lancedb/store.py (canonical, survives hermes-agent updates)
+    wins over the runtime copy (HERMES_HOME/hermes-agent/plugins/memory/lancedb),
+    which gets wiped by updates when untracked. Module cached in sys.modules.
+    """
+    import importlib.util
+    canonical = HERMES_HOME / "plugins" / "lancedb" / "store.py"
+    if canonical.exists():
+        name = "lancedb_store_canonical"
+        if name in sys.modules:
+            return sys.modules[name]
+        spec = importlib.util.spec_from_file_location(name, canonical)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    sys.path.insert(0, str(HERMES_HOME / "hermes-agent"))
+    try:
+        import plugins.memory.lancedb.store as mod  # type: ignore
+        return mod
+    except ImportError:
+        raise ImportError("LanceDB store module introuvable (canonical + runtime)")
+
 def _get_store():
     """Lazy helper to get a LanceDBStore instance (cached)."""
     global _store_instance
     if _store_instance is not None:
         return _store_instance
-    sys.path.insert(0, str(HERMES_HOME / "hermes-agent"))
-    try:
-        from plugins.memory.lancedb.store import LanceDBStore
-    except ImportError:
-        agent_dir = HERMES_HOME / "hermes-agent"
-        sys.path.insert(0, str(agent_dir))
-        from plugins.memory.lancedb.store import LanceDBStore
-    _store_instance = LanceDBStore(LANCEDB_PATH)
+    _store_instance = _import_store_module().LanceDBStore(LANCEDB_PATH)
     return _store_instance
 
 
@@ -255,14 +273,9 @@ def get_graph_data(cluster: str = "raw", threshold: float = 0.65) -> dict:
     """
     _reset_store()
     try:
-        from plugins.memory.lancedb.store import LanceDBStore
+        _import_store_module()
     except ImportError:
-        agent_dir = HERMES_HOME / "hermes-agent"
-        sys.path.insert(0, str(agent_dir))
-        try:
-            from plugins.memory.lancedb.store import LanceDBStore
-        except ImportError:
-            return {"error": "LanceDB plugin not found", "nodes": [], "edges": []}
+        return {"error": "LanceDB plugin not found", "nodes": [], "edges": []}
 
     try:
         store = _get_store()
@@ -808,7 +821,8 @@ def _rebuild_all_links(store, memory_ids: set) -> None:
     """Rebuild links for all memories based on shared entities (2+ threshold)."""
     # Load stop list from store module
     try:
-        from plugins.memory.lancedb.store import _STOP_ENTITIES
+        store_mod = _import_store_module()
+        _STOP_ENTITIES = getattr(store_mod, "_STOP_ENTITIES", set())
     except ImportError:
         _STOP_ENTITIES = set()
 
