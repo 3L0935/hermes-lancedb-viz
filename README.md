@@ -8,22 +8,29 @@ hybrid search (BM25 + vector), and an interactive web dashboard.
 
 A complete memory system for Hermes Agent that persists across sessions:
 
-- **Plugin** (`plugin/`) — LanceDB memory provider for Hermes. 7 MCP tools:
-  search, add, update, delete, get, list, graph. Auto entity extraction,
-  auto-tagging, quality scoring with decay curve, typed relations, hybrid search.
-- **Visualizer** (`server/` + `static/`) — Docker-hosted web UI on port 7777.
-  10 pages: Dashboard, Memories, Timeline, Tags, Duplicates, Embeddings (UMAP),
-  Clusters, Stale, Graph (vis-network). Neon OLED theme.
-- **Scripts** (`scripts/`) — Re-embedding, auto-merge duplicates, verification.
-- **Docs** (`docs/`) — Setup guide, skill reference for memory writing.
+- **Plugin** (`plugin/`) - LanceDB memory provider for Hermes. 8 MCP tools:
+  search, add, update, delete, get, list, graph, conflicts. Auto entity extraction,
+  auto-tagging, quality decay, target-ID relations, local query routing, one-hop
+  graph recall, and deterministic contradiction detection.
+- **Visualizer** (`server/` + `static/`) - lightweight web UI, normally run as a
+  user systemd service on port 7778. 10 pages: Dashboard, Memories, Timeline,
+  Tags, Duplicates, Conflicts, Embeddings, Clusters, Stale, and Graph.
+- **Scripts** (`scripts/`) - relation migration, contradiction backfill,
+  re-embedding, duplicate consolidation, and verification.
+- **Docs** (`docs/`) - Setup guide and memory writing reference.
 
 ## Architecture
 
 ```
-~/.hermes/hermes-agent/plugins/memory/lancedb/   <- Plugin (store.py + __init__.py + plugin.yaml)
-~/.hermes/lancedb/                                 <- LanceDB database files (persistent data)
-~/.hermes/lancedb-viz/                             <- Viz server + static files (bind-mounted in Docker)
+~/.hermes/plugins/lancedb/                       <- Canonical plugin copy
+~/.hermes/hermes-agent/plugins/memory/lancedb/   <- Runtime compatibility copy
+~/.hermes/lancedb/                               <- Persistent LanceDB tables
+~/.hermes/lancedb-viz/                           <- Deployed visualizer files
 ```
+
+The canonical user plugin survives Hermes Agent source-tree updates. The runtime
+copy is retained for bundled-first discovery compatibility. Both are synced from
+this repository's `plugin/` directory.
 
 **Data flow:**
 
@@ -33,9 +40,15 @@ Agent → MCP tools (lancedb_search, lancedb_add, lancedb_update, ...)
     → LanceDB table (memories + vectors)
     → Ollama /api/embed (nomic-embed-text, 768-dim)
     → Entity extraction + auto-tagging
-    → BM25 index (Tantivy FTS)
-    → memory_edges table (typed relations)
+    -> BM25 index (Tantivy FTS)
+    -> memory_edges table (typed relations with concrete target IDs)
+    -> memory_conflicts table (non-destructive key=value contradictions)
 ```
+
+Search defaults to a deterministic local router: exact strings and identifiers
+use lexical retrieval, relationship questions use hybrid seeds plus one-hop edge
+traversal, and all other queries use hybrid BM25/vector retrieval. It adds no
+model call and no service.
 
 ## Requirements
 
@@ -43,7 +56,8 @@ Agent → MCP tools (lancedb_search, lancedb_add, lancedb_update, ...)
 - **Ollama** running on localhost:11434
 - **nomic-embed-text** model pulled: `ollama pull nomic-embed-text`
 - **Python 3.11+** with `lancedb`, `pyarrow`, `httpx`, `numpy`
-- **Docker** (for the visualizer only)
+- **systemd user services** for the default visualizer deployment
+- **Docker** only if you prefer the optional container deployment
 
 ## Quick Start
 
@@ -57,9 +71,11 @@ ollama pull nomic-embed-text
 ### 2. Install the plugin
 
 ```bash
-mkdir -p ~/.hermes/hermes-agent/plugins/memory/lancedb/
-cp plugin/store.py plugin/__init__.py plugin/plugin.yaml \
-   ~/.hermes/hermes-agent/plugins/memory/lancedb/
+mkdir -p ~/.hermes/plugins/lancedb \
+  ~/.hermes/hermes-agent/plugins/memory/lancedb
+cp plugin/{store.py,__init__.py,plugin.yaml} ~/.hermes/plugins/lancedb/
+cp plugin/{store.py,__init__.py,plugin.yaml} \
+  ~/.hermes/hermes-agent/plugins/memory/lancedb/
 
 cd ~/.hermes/hermes-agent
 venv/bin/pip install lancedb pyarrow httpx numpy
@@ -84,31 +100,32 @@ systemctl --user restart hermes-gateway
 hermes tools | grep lancedb
 ```
 
-### 4. Deploy the visualizer (optional)
+### 4. Deploy the visualizer
 
 ```bash
-cd hermes-lancedb-viz
-docker build -t lancedb-viz:local .
-docker compose up -d
+./scripts/deploy-local.sh --dry-run
+./scripts/deploy-local.sh
+systemctl --user enable lancedb-viz.service
 ```
 
-Dashboard: `http://localhost:7777`
+Dashboard: `http://localhost:7778`
 
 For the full setup guide, see [docs/setup.md](docs/setup.md).
 
 ## MCP Tools
 
-The plugin exposes 7 tools to the Hermes agent:
+The plugin exposes 8 tools to the Hermes agent:
 
 | Tool | Purpose |
 |------|---------|
-| `lancedb_search` | Hybrid search (BM25 + vector + RRF fusion). Returns ranked results with quality score and relations. |
-| `lancedb_add` | Store a new memory. Structured fields (domain, subject, tier, category) or legacy content string. Auto-extracts entities, auto-tags, builds links. |
-| `lancedb_update` | Edit an existing memory in-place by ID. Updates content (re-embeds), category, tags, quality, or type. |
-| `lancedb_delete` | Delete a memory by ID. Rebuilds remaining links. |
+| `lancedb_search` | Auto-routed lexical, hybrid, or one-hop graph recall. Supports explicit `mode` and `relation_depth`. |
+| `lancedb_add` | Store a memory and optional typed relations. Reports new potential conflicts. |
+| `lancedb_update` | Edit a memory in place, re-embed changed content, and replace relations safely. |
+| `lancedb_delete` | Delete a memory and clean incoming and outgoing typed edges. |
 | `lancedb_get` | Get a single memory by ID with all fields. |
-| `lancedb_list` | List all memories with filters (category, tier, quality_min). No approximate search — exact listing. |
-| `lancedb_graph` | Export the full memory knowledge graph as nodes + edges. |
+| `lancedb_list` | Exact listing with category, tier, and quality filters. |
+| `lancedb_graph` | Export the memory graph. |
+| `lancedb_conflicts` | List deterministic same-subject `key=value` contradictions. |
 
 ### Memory format
 
@@ -121,7 +138,7 @@ Domain:Subject key=value key=value. [Tier=N]
 - **Subject**: Specific subject within the domain
 - **Tier**: 1=critical (bugs, corrections), 2=useful (stack, URLs), 3=contextual
 - **Category**: project, tech, fact, correction, user_pref, decision, insight, reference, pattern, question
-- **Relations**: Optional typed links (part_of, depends, requires, runs_on, connects_to, uses, extends)
+- **Relations**: Optional typed links (`part_of`, `depends`, `requires`, `runs_on`, `connects_to`, `uses`, `extends`, `supersedes`, `invalidates`, `contradicts`). Prefer structured relations with a `target_id`; a short target label is resolved only when unique.
 
 See [docs/skills/memory-writing.md](docs/skills/memory-writing.md) for the full writing guide.
 
@@ -152,19 +169,18 @@ A noise filter (~140+ words) blocks generic FR/EN words.
 
 ### Hybrid search
 
-LanceDB 0.33+ native hybrid: BM25 (Tantivy FTS) + vector cosine, fused via Reciprocal Rank Fusion (RRF).
-Precision gate filters results with RRF score < 0.005.
-Recall: ~97.9% (hybrid) vs 66.5% BM25-only vs 17.7% vector-only.
+LanceDB native hybrid retrieval combines BM25 (Tantivy FTS) and vector cosine through Reciprocal Rank Fusion. A precision gate filters obvious low-score noise. Exact and relationship-shaped queries are routed locally without an LLM call.
 
 ## Visualizer
 
-Docker container with 10 pages:
+Lightweight systemd service with 10 pages:
 
 - **Dashboard** — total memories, category breakdown, tier distribution, top accessed
 - **Memories** — paginated list (20/page) with filters (category, type, tag, quality, date, search)
 - **Timeline** — memories grouped by day
 - **Tags** — all tags with counts, rename/merge/delete operations
 - **Duplicates** — near-duplicate groups by cosine similarity (threshold slider)
+- **Conflicts** - explicit same-subject claim contradictions, with open/resolved filtering
 - **Embeddings** — UMAP 2D projection of all memory vectors
 - **Clusters** — semantic clusters (threshold + min size controls)
 - **Stale** — old + low-quality memories (cleanup candidates)
@@ -181,6 +197,7 @@ GET  /api/duplicates         — duplicate groups (threshold param)
 GET  /api/projection         — UMAP 2D projection
 GET  /api/clusters           — semantic clusters
 GET  /api/stale              — stale memories
+GET  /api/conflicts          - contradiction ledger (`status`, `memory_id`, `limit`)
 GET  /api/graph              — full graph (nodes + edges + typed_edges)
 GET  /api/stats              — raw stats
 POST /api/memories/:id       — update memory
@@ -194,6 +211,24 @@ POST /api/export | import
 ```
 
 ## Scripts
+
+### deploy-local.sh
+
+Synchronizes the repository into the canonical user plugin, the runtime compatibility copy, and the systemd visualizer deployment. It does not restart the Hermes gateway.
+
+```bash
+./scripts/deploy-local.sh --dry-run
+./scripts/deploy-local.sh
+```
+
+### migrate_graph_retention.py
+
+Backfills concrete target IDs on legacy relations, removes source-orphaned edges on apply, and builds the deterministic conflict ledger. Dry-run is the default. Back up the database before `--apply`.
+
+```bash
+~/.hermes/hermes-agent/venv/bin/python scripts/migrate_graph_retention.py
+~/.hermes/hermes-agent/venv/bin/python scripts/migrate_graph_retention.py --apply
+```
 
 ### reembed-entries.py
 
@@ -223,7 +258,9 @@ Behavior:
 - Deletes duplicates with exact content match (safe auto-merge)
 - Skips duplicates with different content (needs manual review)
 
-## Docker
+## Optional Docker deployment
+
+The repository retains Docker support for portable deployments. The default low-footprint local pipeline uses `lancedb-viz.service` on port 7778 instead.
 
 ```yaml
 # docker-compose.yml

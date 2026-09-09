@@ -1,0 +1,14 @@
+[Unit]
+Description=LanceDB memory visualizer
+After=network.target
+
+[Service]
+Type=simple
+Environment=HERMES_HOME=%h/.hermes
+WorkingDirectory=%h/.hermes/lancedb-viz
+ExecStart=%h/.hermes/hermes-agent/venv/bin/python %h/.hermes/lancedb-viz/server.py --host 127.0.0.1 --port 7778
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

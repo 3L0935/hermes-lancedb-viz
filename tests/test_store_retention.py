@@ -196,6 +196,17 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertEqual(1, len(rows))
         self.assertIsNone(rows[0]["target_id"])
 
+    def test_unique_short_subject_label_resolves(self):
+        target_id = self.add("Hermes:MemoryWriting state=active [Tier=2]")
+        source_id = self.add(
+            "Project:Alpha state=active [Tier=2]",
+            relations=[{"type": "depends", "target": "MemoryWriting"}],
+        )
+
+        edge = self.store.get_typed_edges()[0]
+        self.assertEqual(source_id, edge["from"])
+        self.assertEqual(target_id, edge["to"])
+
     def test_ambiguous_label_is_retained_but_not_resolved(self):
         self.add("Project:Alpha state=active [Tier=2]")
         self.add("Project:Alpha owner=elo [Tier=2]")

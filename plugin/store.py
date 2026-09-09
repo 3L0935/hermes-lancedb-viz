@@ -460,14 +460,14 @@ class LanceDBStore:
                 target_label = (by_id[target_id].get("content") or "").split(None, 1)[0]
             return target_id, target_label
 
-        wanted = canonical_subject(target_label)
-        if not wanted and ":" in target_label:
-            wanted = target_label.rstrip(":,.;").lower()
-        matches = [
-            str(memory["id"])
-            for memory in memories
-            if wanted and canonical_subject(memory.get("content", "")) == wanted
-        ]
+        wanted = canonical_subject(target_label) or target_label.rstrip(":,.;").lower()
+        matches = []
+        for memory in memories:
+            memory_key = canonical_subject(memory.get("content", ""))
+            exact_match = wanted and memory_key == wanted
+            short_match = wanted and ":" not in wanted and memory_key.partition(":")[2] == wanted
+            if exact_match or short_match:
+                matches.append(str(memory["id"]))
         return (matches[0], target_label) if len(matches) == 1 else ("", target_label)
 
     def _replace_relations(self, mem_id: str, relations: list[dict]) -> list[dict]:

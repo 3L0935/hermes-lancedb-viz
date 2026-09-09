@@ -1,69 +1,23 @@
-# Setup — Install LanceDB Memory + Visualizer
+# Setup Guide
 
-Complete guide from zero to a local vector memory store with interactive visualization.
-
----
-
-## Table of Contents
-
-1. [Prerequisites](#1-prerequisites)
-2. [Install the Plugin](#2-install-the-plugin)
-3. [Configure Hermes](#3-configure-hermes)
-4. [Ollama Embeddings](#4-ollama-embeddings)
-5. [Database](#5-database)
-6. [Visualizer (Docker)](#6-visualizer-docker)
-7. [Smoke Test](#7-smoke-test)
-8. [Troubleshooting](#8-troubleshooting)
-
----
+This guide installs the local-only LanceDB memory provider and its lightweight systemd visualizer. LanceDB remains the only persistent database. Ollama is used only for embeddings.
 
 ## 1. Prerequisites
 
-| Tool | Min Version | Why |
-|------|-------------|-----|
-| Python | 3.11+ | LanceDB + Arrow |
-| Docker | 24+ | Viz container |
-| Ollama | 0.3+ | Local embeddings |
-| Hermes Agent | 1.x+ | Memory provider plugin |
+- Hermes Agent with a Python 3.11+ virtual environment
+- Ollama listening on `127.0.0.1:11434`
+- `nomic-embed-text`
+- A user systemd session for the visualizer
 
 ```bash
-python3 --version
-docker --version
-ollama --version
 ollama pull nomic-embed-text
-```
-
-## 2. Install the Plugin
-
-Copy the plugin files to Hermes plugins directory:
-
-```bash
-mkdir -p ~/.hermes/hermes-agent/plugins/memory/lancedb/
-cp plugin/store.py plugin/__init__.py plugin/plugin.yaml \
-   ~/.hermes/hermes-agent/plugins/memory/lancedb/
-```
-
-Install Python dependencies in Hermes venv:
-
-```bash
 cd ~/.hermes/hermes-agent
 venv/bin/pip install lancedb pyarrow httpx numpy
 ```
 
-Verify:
+## 2. Configure Hermes
 
-```bash
-cd ~/.hermes/hermes-agent
-venv/bin/python -c "
-from plugins.memory.lancedb import LanceDBMemoryProvider
-from plugins.memory.lancedb.store import LanceDBStore
-print('Plugin OK — imports successful')
-"
-```
-
-## 3. Configure Hermes
-
-In `~/.hermes/config.yaml`, add:
+In `~/.hermes/config.yaml`:
 
 ```yaml
 memory:
@@ -73,180 +27,135 @@ memory:
     embed_model: nomic-embed-text
 ```
 
-Restart Hermes:
+The plugin does not auto-ingest conversations. Writes remain explicit through `lancedb_add`. Optional LLM relation extraction is not part of the default path and must remain disabled unless deliberately implemented and enabled in a future release.
+
+## 3. Preview and deploy
+
+From the repository root:
 
 ```bash
-systemctl --user restart hermes-gateway
-
-# Verify tools are loaded
-hermes tools | grep lancedb
-# → lancedb_search  lancedb_add  lancedb_graph  lancedb_delete  lancedb_update  lancedb_get  lancedb_list
+./scripts/deploy-local.sh --dry-run
+./scripts/deploy-local.sh
+systemctl --user enable lancedb-viz.service
 ```
 
-## 4. Ollama Embeddings
+The deployment synchronizes:
 
-The store calls Ollama via HTTP for embeddings.
+```text
+plugin/       -> ~/.hermes/plugins/lancedb/
+plugin/       -> ~/.hermes/hermes-agent/plugins/memory/lancedb/
+server/static -> ~/.hermes/lancedb-viz/
+systemd unit  -> ~/.config/systemd/user/lancedb-viz.service
+```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
-| `LANCE_EMBED_MODEL` | `nomic-embed-text` | Model (768d) |
+The canonical user plugin survives Hermes source-tree updates. The runtime copy is retained for bundled-first compatibility.
 
-Keep the model warm:
+## 4. Migrate an existing database
+
+Always preview first. Before applying, create a complete filesystem backup while writers are quiet.
 
 ```bash
-ollama run nomic-embed-text --keep-alive 30m
+~/.hermes/hermes-agent/venv/bin/python scripts/migrate_graph_retention.py
+cp -a ~/.hermes/lancedb ~/.hermes/lancedb-backup-$(date +%Y%m%d-%H%M%S)
+~/.hermes/hermes-agent/venv/bin/python scripts/migrate_graph_retention.py --apply
 ```
 
-### From Docker (viz)
+The migration:
 
-The container needs `host.docker.internal` to reach Ollama on the host:
+- adds `target_id` to legacy `memory_edges` schemas;
+- resolves exact `Domain:Subject` targets;
+- resolves short subjects only when exactly one memory matches;
+- leaves ambiguous or missing targets unresolved;
+- removes edges whose source memory no longer exists;
+- creates or backfills `memory_conflicts` from explicit same-subject `key=value` disagreements.
 
-```yaml
-# docker-compose.yml
-environment:
-  - OLLAMA_HOST=http://host.docker.internal:11434
-```
+It makes no network or LLM call. It does not merge, replace, or delete memories.
 
-On Linux without Docker Desktop, use your host's LAN IP instead.
+## 5. Restart Hermes
 
-## 5. Database
-
-The store creates the database automatically on first launch.
-
-```
-~/.hermes/lancedb/
-├── memories.lance/     # Main table (LanceDB columnar format)
-└── memory_edges/       # Typed relations table
-```
-
-### Compact old versions
-
-LanceDB keeps every version on every write. Compact after batches > 20:
-
-```python
-import lancedb
-from datetime import timedelta
-db = lancedb.connect("~/.hermes/lancedb")
-tbl = db.open_table("memories")
-tbl.cleanup_old_versions(timedelta(seconds=0))
-```
-
-### Re-embedding
-
-After batch content modifications (>5 entries), re-embed:
+The visualizer is restarted by the deploy script. Restart the Hermes gateway separately so its process reloads the provider and exposes the current tool schemas:
 
 ```bash
-~/.hermes/hermes-agent/venv/bin/python3 scripts/reembed-entries.py
+systemctl --user restart hermes-gateway.service
 ```
 
-## 6. Visualizer (Docker)
+If issuing that command from inside a running Hermes gateway is blocked, execute it from another shell or use the client restart command.
 
-### Build
+## 6. Verify
 
 ```bash
-cd hermes-lancedb-viz
-docker build -t lancedb-viz:local .
-```
-
-### Run
-
-```bash
-docker compose up -d
-```
-
-Or with the wrapper script:
-
-```bash
-./scripts/docker-run.sh
-```
-
-### Bind mounts
-
-| Host | Container | Mode |
-|------|-----------|------|
-| `~/.hermes/lancedb` | `/home/hermes/.hermes/lancedb` | rw |
-| `~/.hermes/hermes-agent` | `/home/hermes/.hermes/hermes-agent` | ro |
-| `./static` | `/app/static` | ro |
-| `./server/server.py` | `/app/server.py` | ro |
-
-### Access
-
-```
-http://localhost:7777
-```
-
-### Healthcheck
-
-```bash
-curl -s http://localhost:7777/api/stats | python3 -m json.tool
-```
-
-## 7. Smoke Test
-
-```bash
+systemctl --user is-active lancedb-viz.service
+curl -fsS http://127.0.0.1:7778/api/stats | python -m json.tool
+curl -fsS http://127.0.0.1:7778/api/graph | python -m json.tool
+curl -fsS 'http://127.0.0.1:7778/api/conflicts?status=open' | python -m json.tool
 ./scripts/verify-setup.sh
 ```
 
-Checks:
-- Container running
-- HTTP 200 on `/`
-- API `/api/stats` returns JSON with `total_memories > 0`
-- API `/api/dashboard` works
-- All static files served (app.js, graph.js, style.css, vis-network.min.js)
+Expected properties:
 
-## 8. Troubleshooting
+- the service reports `active`;
+- `/api/stats` reports the existing memory count;
+- every typed edge returned by `/api/graph` has `from` and `to` memory IDs;
+- `/api/conflicts` returns a JSON array;
+- the plugin exposes eight tools, including `lancedb_conflicts`;
+- canonical and runtime plugin files are byte-identical to `plugin/`.
 
-### Plugin not found
+Dashboard: `http://127.0.0.1:7778`
 
+## 7. Retrieval behavior
+
+`lancedb_search` defaults to `mode=auto`:
+
+- quoted strings, UUIDs, paths, and exact-query markers use lexical retrieval;
+- relationship-shaped questions use hybrid seed retrieval plus one-hop typed-edge traversal;
+- other queries use BM25/vector hybrid retrieval;
+- `relation_depth=0` disables traversal;
+- explicit `mode=lexical|hybrid|graph` overrides routing.
+
+This routing is deterministic and local. It adds no model call or daemon.
+
+## 8. Contradiction behavior
+
+The detector is intentionally conservative. It records a conflict only when two supported memory categories share the same `Domain:Subject` and the same explicit key with different values.
+
+```text
+Project:Alpha port=7777 [Tier=2]
+Project:Alpha port=7778 [Tier=2]
 ```
-/api/stats → {"error": "LanceDB plugin not found"}
-```
 
-Causes:
-1. `store.py` / `__init__.py` missing → copy from `plugin/` directory
-2. Python deps missing → `venv/bin/pip install lancedb pyarrow`
-3. `__init__.py` missing `from .store import LanceDBStore` → add the import
-4. Venv misconfigured → verify with `venv/bin/python -c "from plugins.memory.lancedb import LanceDBMemoryProvider; print('OK')"`
+Both memories remain intact. Updating a claim closes stale open conflicts and rechecks the current content. Use `lancedb_conflicts` or the visualizer's Conflicts page for review.
 
-LanceDB data is never lost — the columnar format persists even if plugin files are deleted.
+## 9. Troubleshooting
 
-### Ollama unreachable from Docker
+### Plugin tools are missing
+
+Verify both copies and restart the gateway:
 
 ```bash
-docker exec lancedb-viz curl -s http://host.docker.internal:11434/api/tags
+diff -u plugin/store.py ~/.hermes/plugins/lancedb/store.py
+diff -u plugin/store.py ~/.hermes/hermes-agent/plugins/memory/lancedb/store.py
+systemctl --user restart hermes-gateway.service
 ```
 
-If it fails, use your host's LAN IP: `OLLAMA_HOST=http://192.168.x.x:11434`
+### Visualizer does not start
 
-### DB size bloating
-
-LanceDB keeps old versions. See [Compact old versions](#compact-old-versions) above.
-
-### Tags return null
-
-```json
-{"error": "'NoneType' object is not iterable"}
+```bash
+systemctl --user status lancedb-viz.service
+journalctl --user -u lancedb-viz.service -n 100 --no-pager
 ```
 
-Some entries have `tags: null`. Backfill:
+### Legacy relations remain unresolved
 
-```python
-store = LanceDBStore(Path("~/.hermes/lancedb"))
-table = store._table
-df = table.to_arrow().to_pandas()
-for _, row in df.iterrows():
-    if row.get("tags") is None:
-        table.update(where=f'id="{row["id"]}"', values={"tags": "[]"})
+Run the dry-run and inspect `ambiguous_or_missing`. Those rows are intentionally not guessed. Update them with a concrete `target_id` or a unique target label.
+
+### Ollama is unavailable
+
+Writes can fall back to a zero vector, which reduces retrieval quality. Restore Ollama and run:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/python scripts/reembed-entries.py
 ```
 
-### Dashboard stuck on "Loading..."
+### Optional Docker deployment
 
-Open the browser console (F12). Common causes:
-1. `SyntaxError: Identifier 'catColors' has already been declared` → const duplicated between graph.js and app.js
-2. `await is only valid in async function` → function missing `async`
-3. HTTP error on API fetch → check server logs: `docker logs lancedb-viz`
-
----
-
-*Repo: [hermes-lancedb-viz](https://github.com/3L0935/hermes-lancedb-viz)*
+Docker files remain available for portable setups, but the supported low-footprint local pipeline is the user systemd service on port 7778.
