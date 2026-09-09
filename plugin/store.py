@@ -194,6 +194,17 @@ VALID_CATEGORIES = {
     "decision", "insight", "reference", "pattern", "question",
 }
 
+VALID_RELATION_TYPES = {
+    "part_of", "depends", "requires", "runs_on", "connects_to",
+    "uses", "extends", "supersedes", "invalidates", "contradicts",
+}
+
+
+def canonical_subject(content: str) -> str:
+    """Return the normalized Domain:Subject key from a memory body."""
+    first = (content or "").strip().split(None, 1)[0] if (content or "").strip() else ""
+    return first.rstrip(":,.;").lower() if ":" in first else ""
+
 # ---------------------------------------------------------------------------
 # Entity extraction
 # ---------------------------------------------------------------------------
@@ -311,7 +322,11 @@ class LanceDBStore:
         """Create FTS (BM25) index on content column for hybrid search.
         Idempotent via replace=True — safe to call on every init."""
         try:
-            tbl.create_fts_index("content", replace=True)
+            try:
+                from lancedb.index import FTS
+                tbl.create_index("content", config=FTS(), replace=True)
+            except (ImportError, TypeError, AttributeError):
+                tbl.create_fts_index("content", replace=True)
             logger.info("FTS index ready on content column")
         except Exception as e:
             logger.debug("FTS index creation skipped: %s", e)
@@ -371,69 +386,119 @@ class LanceDBStore:
         return relations
 
     def _ensure_edges_table(self):
-        """Create memory_edges table if it doesn't exist."""
+        """Open the edge table and add target_id to legacy schemas."""
         import pyarrow as pa
         try:
-            return self._db.open_table("memory_edges")
+            table = self._db.open_table("memory_edges")
+            try:
+                table.checkout_latest()
+            except Exception:
+                pass
+            if "target_id" not in table.schema.names:
+                table.add_columns(pa.field("target_id", pa.string()))
+                table.checkout_latest()
+            return table
         except Exception:
             schema = pa.schema([
                 pa.field("source_id", pa.string()),
                 pa.field("relation_type", pa.string()),
+                pa.field("target_id", pa.string()),
                 pa.field("target_label", pa.string()),
                 pa.field("created_at", pa.float64()),
             ])
             return self._db.create_table("memory_edges", schema=schema)
 
-    def _write_relations(self, mem_id: str, content: str):
-        """Parse and write ::relations:: edges for a memory."""
-        relations = self._parse_relations(content)
-        if not relations:
-            return
+    def _resolve_relation_target(self, relation: dict) -> tuple[str, str]:
+        """Resolve a relation target without guessing between duplicate subjects."""
+        target_id = str(relation.get("target_id") or "").strip()
+        target_label = str(relation.get("target") or relation.get("target_label") or "").strip()
+        memories = self._get_all_raw()
+        by_id = {str(memory["id"]): memory for memory in memories}
+
+        if target_id and target_id in by_id:
+            if not target_label:
+                target_label = (by_id[target_id].get("content") or "").split(None, 1)[0]
+            return target_id, target_label
+
+        wanted = canonical_subject(target_label)
+        if not wanted and ":" in target_label:
+            wanted = target_label.rstrip(":,.;").lower()
+        matches = [
+            str(memory["id"])
+            for memory in memories
+            if wanted and canonical_subject(memory.get("content", "")) == wanted
+        ]
+        return (matches[0], target_label) if len(matches) == 1 else ("", target_label)
+
+    def _replace_relations(self, mem_id: str, relations: list[dict]) -> list[dict]:
+        """Replace all outgoing relations for a memory and return normalized rows."""
+        table = self._ensure_edges_table()
+        table.delete(f"source_id = '{mem_id}'")
+        normalized = []
+        now = time.time()
+        rows = []
+        for relation in relations:
+            if not isinstance(relation, dict):
+                continue
+            relation_type = str(relation.get("type") or "").strip().lower()
+            if relation_type not in VALID_RELATION_TYPES:
+                continue
+            target_id, target_label = self._resolve_relation_target(relation)
+            if not target_id and not target_label:
+                continue
+            normalized_relation = {
+                "type": relation_type,
+                "target_id": target_id,
+                "target": target_label,
+            }
+            normalized.append(normalized_relation)
+            rows.append({
+                "source_id": mem_id,
+                "relation_type": relation_type,
+                "target_id": target_id,
+                "target_label": target_label,
+                "created_at": now,
+            })
+        if rows:
+            table.add(rows)
+        return normalized
+
+    def _cleanup_edges_for_memory(self, mem_id: str) -> None:
+        """Remove every incoming and outgoing typed edge for a memory."""
         try:
-            tbl = self._ensure_edges_table()
-            now = time.time()
-            for r in relations:
-                tbl.add([{
-                    "source_id": mem_id,
-                    "relation_type": r["type"],
-                    "target_label": r["target"],
-                    "created_at": now,
-                }])
-        except Exception as e:
-            logger.warning("Failed to write relations for %s: %s", mem_id, e)
+            table = self._ensure_edges_table()
+            table.delete(f"source_id = '{mem_id}' OR target_id = '{mem_id}'")
+        except Exception as error:
+            logger.warning("Failed to clean relations for %s: %s", mem_id, error)
+
+    def _write_relations(self, mem_id: str, content: str):
+        """Compatibility wrapper for relation blocks embedded in content."""
+        return self._replace_relations(mem_id, self._parse_relations(content))
 
     def _write_relations_list(self, mem_id: str, relations: list[dict]):
-        """Write typed edges to memory_edges for a list of {type, target}."""
-        if not relations:
-            return
-        try:
-            tbl = self._ensure_edges_table()
-            now = time.time()
-            for r in relations:
-                tbl.add([{
-                    "source_id": mem_id,
-                    "relation_type": r["type"],
-                    "target_label": r["target"],
-                    "created_at": now,
-                }])
-        except Exception as e:
-            logger.warning("Failed to write relations for %s: %s", mem_id, e)
+        """Replace typed edges from a list of relation dictionaries."""
+        return self._replace_relations(mem_id, relations)
 
-    def get_typed_edges(self) -> list[dict]:
-        """Return all typed edges from memory_edges."""
+    def get_typed_edges(self, include_unresolved: bool = False) -> list[dict]:
+        """Return typed edges with a concrete ``to`` ID when resolved."""
         try:
-            tbl = self._ensure_edges_table()
-            data = tbl.to_arrow().to_pydict()
+            table = self._ensure_edges_table()
+            data = table.to_arrow().to_pydict()
             edges = []
             for i in range(len(data.get("source_id", []))):
+                target_id = str((data.get("target_id") or [""])[i] or "")
+                if not include_unresolved and not target_id:
+                    continue
                 edges.append({
                     "from": str(data["source_id"][i]),
+                    "to": target_id,
                     "relation_type": str(data["relation_type"][i]),
                     "target_label": str(data["target_label"][i]),
                     "created_at": float(data["created_at"][i]),
                 })
             return edges
-        except Exception:
+        except Exception as error:
+            logger.warning("Failed to read typed relations: %s", error)
             return []
 
     # -----------------------------------------------------------------------
@@ -495,7 +560,8 @@ class LanceDBStore:
             session_id: str = "", user_id: str = "",
             tags: list[str] | None = None,
             quality: float | None = None,
-            type_: str | None = None) -> str:
+            type_: str | None = None,
+            relations: list[dict] | None = None) -> str:
         """Add a new memory. Extracts entities, embeds, links."""
         self._fresh()
         from uuid import uuid4
@@ -505,9 +571,11 @@ class LanceDBStore:
         if category not in VALID_CATEGORIES:
             category = "fact"
 
-        # Separate relations from content
+        # Separate legacy relation blocks from content. Explicit structured
+        # relations take precedence and are resolved after the memory exists.
         clean_content, relations_json = self._strip_relations_from_content(content)
-        relations_list = json.loads(relations_json)
+        relations_list = relations if relations is not None else json.loads(relations_json)
+        relations_json = json.dumps(relations_list)
 
         vector = self._embed(clean_content)
         entities = extract_entities(clean_content)
@@ -545,8 +613,12 @@ class LanceDBStore:
         # Build links for the new memory
         self._rebuild_links_for(mem_id)
 
-        # Write typed relations to memory_edges
-        self._write_relations_list(mem_id, relations_list)
+        # Replace typed relations and persist their resolved IDs in the memory row.
+        normalized_relations = self._write_relations_list(mem_id, relations_list)
+        self._table.update(
+            f"id = '{mem_id}'",
+            {"relations": json.dumps(normalized_relations)},
+        )
 
         self._update_db_size()
 
@@ -562,19 +634,20 @@ class LanceDBStore:
 
             updates = {}
             now = time.time()
+            relations_to_replace = None
 
             if "content" in kwargs and kwargs["content"]:
                 clean_content, relations_json = self._strip_relations_from_content(kwargs["content"])
                 updates["content"] = clean_content
-                updates["relations"] = relations_json
+                relations_to_replace = json.loads(relations_json)
                 # Re-extract entities
                 updates["entities"] = json.dumps(extract_entities(clean_content))
                 # Re-embed
                 vector = self._embed(clean_content)
                 updates["vector"] = vector.tolist()
-                # Re-write relations
-                relations_list = json.loads(relations_json)
-                self._write_relations_list(memory_id, relations_list)
+
+            if "relations" in kwargs and isinstance(kwargs["relations"], list):
+                relations_to_replace = kwargs["relations"]
 
             if "category" in kwargs and kwargs["category"] in VALID_CATEGORIES:
                 updates["category"] = kwargs["category"]
@@ -591,11 +664,19 @@ class LanceDBStore:
             if "entities" in kwargs and isinstance(kwargs["entities"], list):
                 updates["entities"] = json.dumps(kwargs["entities"])
 
-            if not updates:
+            if not updates and relations_to_replace is None:
                 return False
 
-            updates["updated_at"] = now
-            self._table.update(f"id = '{memory_id}'", updates)
+            if updates:
+                updates["updated_at"] = now
+                self._table.update(f"id = '{memory_id}'", updates)
+
+            if relations_to_replace is not None:
+                normalized_relations = self._write_relations_list(memory_id, relations_to_replace)
+                self._table.update(
+                    f"id = '{memory_id}'",
+                    {"relations": json.dumps(normalized_relations), "updated_at": now},
+                )
 
             # Rebuild links if entities changed
             if "entities" in updates:
@@ -614,6 +695,7 @@ class LanceDBStore:
             if not existing:
                 return False
             self._table.delete(f"id = '{memory_id}'")
+            self._cleanup_edges_for_memory(memory_id)
             self._rebuild_all_links()
             self._update_db_size()
             return True
