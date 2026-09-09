@@ -30,6 +30,9 @@
     <div class="nav-item" data-page="duplicates" onclick="switchPage('duplicates')">
       <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="3" width="10" height="10" rx="1"/><rect x="5" y="1" width="10" height="10" rx="1"/></svg></span><span>Duplicates</span>
     </div>
+    <div class="nav-item" data-page="conflicts" onclick="switchPage('conflicts')">
+      <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2l6 11H2L8 2z"/><path d="M8 6v3M8 11v1"/></svg></span><span>Conflicts</span>
+    </div>
     <div class="nav-item" data-page="embedding" onclick="switchPage('embedding')">
       <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="5" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="8" cy="9" r="1.5"/><circle cx="3" cy="12" r="1.5"/><circle cx="12" cy="11" r="1.5"/></svg></span><span>Embeddings</span>
     </div>
@@ -146,7 +149,18 @@
         </div>
       </div>
 
-      <!-- ═══ Embeddings ═══ -->
+      <!-- Conflicts -->
+      <div id="page-conflicts" class="page">
+        <div class="page-inner">
+          <div class="section-header"><h2>Potential Conflicts</h2><span class="sub" id="conflict-count"></span></div>
+          <div class="filter-bar">
+            <label>Status <select id="conflict-status" onchange="loadConflicts()"><option value="open">Open</option><option value="resolved">Resolved</option><option value="">All</option></select></label>
+          </div>
+          <div id="conflict-container"></div>
+        </div>
+      </div>
+
+      <!-- Embeddings -->
       <div id="page-embedding" class="page">
         <div class="page-inner">
           <div class="section-header"><h2>Embedding Projection</h2><span class="sub" id="emb-count"></span></div>

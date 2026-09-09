@@ -392,7 +392,27 @@ textarea { resize: vertical; min-height: 80px; font-family: 'JetBrains Mono', mo
 .dup-item { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 6px; border: 1px solid rgba(99,102,241,0.08); margin-bottom: 4px; font-size: 11px; cursor: pointer; }
 .dup-item:hover { background: rgba(99,102,241,0.04); }
 
-/* ─── Search panel ─── */
+/* Conflict ledger */
+.conflict-card {
+  background: rgba(16,16,36,0.75); border: 1px solid rgba(245,158,11,0.28);
+  border-radius: 10px; margin-bottom: 12px; padding: 14px;
+}
+.conflict-card.conflict-resolved { border-color: var(--border); opacity: 0.72; }
+.conflict-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.conflict-subject { color: var(--amber-soft); font-family: 'Fira Code', monospace; font-size: 11px; }
+.conflict-status { margin-left: auto; color: var(--muted); font-size: 9px; text-transform: uppercase; }
+.conflict-pair { display: grid; grid-template-columns: 1fr auto 1fr; align-items: stretch; gap: 8px; }
+.conflict-memory {
+  display: flex; flex-direction: column; gap: 5px; min-width: 0; padding: 10px;
+  background: #0a0a16; border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); text-align: left; cursor: pointer;
+}
+.conflict-memory:hover { border-color: var(--amber); background: rgba(217,119,6,0.06); }
+.conflict-memory b { color: var(--amber-soft); font-family: 'Fira Code', monospace; }
+.conflict-memory span { color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.conflict-vs { align-self: center; color: var(--dim); font-size: 10px; text-transform: uppercase; }
+
+/* Search panel */
 #search-panel {
   position: fixed; top: 100px; left: 24px;
   width: 340px; max-height: 400px; overflow-y: auto;

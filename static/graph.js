@@ -207,14 +207,14 @@ function resetTypedHighlights() {
       : (catColors[n.category] || defaultColor);
 
     // Recompute age border
-    let ageBorder = c.border, ageGlow = c.glow, ageBW = 2;
+    let ageBorder = c.border, ageGlow = c.glow, ageBW = 2, ageShadow = 10;
     if (!isHub && n.created_at) {
       const ageHours = (Date.now()/1000 - n.created_at) / 3600;
-      if (ageHours < 1)        { ageBorder = '#ffffff'; ageGlow = 'rgba(255,255,255,0.9)'; ageBW = 3; }
-      else if (ageHours < 24)  { ageBorder = '#e0e7ff'; ageGlow = 'rgba(199,210,254,0.7)'; }
-      else if (ageHours < 168) { ageBorder = '#a5b4fc'; ageGlow = 'rgba(165,180,252,0.5)'; }
-      else if (ageHours < 720) { ageBorder = '#6366f1'; ageGlow = 'rgba(99,102,241,0.35)'; }
-      else                     { ageBorder = '#4338ca'; ageGlow = 'rgba(67,56,202,0.2)'; }
+      if (ageHours < 1)        { ageBorder = '#ffffff'; ageGlow = 'rgba(255,255,255,0.9)'; ageBW = 3; ageShadow = 30; }
+      else if (ageHours < 24)  { ageBorder = '#e0e7ff'; ageGlow = 'rgba(199,210,254,0.7)'; ageShadow = 16; }
+      else if (ageHours < 168) { ageBorder = '#a5b4fc'; ageGlow = 'rgba(165,180,252,0.5)'; ageShadow = 8; }
+      else if (ageHours < 720) { ageBorder = '#6366f1'; ageGlow = 'rgba(99,102,241,0.35)'; ageShadow = 5; }
+      else                     { ageBorder = '#4338ca'; ageGlow = 'rgba(67,56,202,0.2)'; ageShadow = 3; }
     }
     nodes.update({
       id: id,

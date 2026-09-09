@@ -982,6 +982,22 @@ def api_get_stale(days: int = 90, quality_max: float = 0.3) -> list:
         return {"error": str(e)}
 
 
+def api_get_conflicts(params: dict) -> list:
+    """GET /api/conflicts - deterministic contradiction ledger."""
+    try:
+        status = params.get("status", "")
+        if status not in {"", "open", "resolved"}:
+            return {"error": "status must be empty, open, or resolved"}
+        store = _get_store()
+        return store.get_conflicts(
+            status=status,
+            memory_id=params.get("memory_id", ""),
+            limit=min(max(int(params.get("limit", 100)), 1), 500),
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def api_get_dashboard() -> dict:
     """GET /api/dashboard — enriched stats for the dashboard view.
     Uses cached computation to avoid full DB scan on every request.
@@ -1239,6 +1255,9 @@ class Handler(BaseHTTPRequestHandler):
             days = int(params.get("days", ["90"])[0])
             quality_max = float(params.get("quality_max", ["0.3"])[0])
             self._send_json(api_get_stale(days, quality_max))
+        elif path == "/api/conflicts":
+            p = {k: v[0] for k, v in params.items()}
+            self._send_json(api_get_conflicts(p))
         elif path == "/api/dashboard":
             self._send_json(api_get_dashboard())
         elif path == "/api/refresh":

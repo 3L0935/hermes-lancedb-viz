@@ -22,6 +22,7 @@ function switchPage(name) {
   else if (name === 'timeline') loadTimeline();
   else if (name === 'tags') loadTags();
   else if (name === 'duplicates') loadDuplicates();
+  else if (name === 'conflicts') loadConflicts();
   else if (name === 'embedding') loadEmbedding();
   else if (name === 'clusters') loadClusters();
   else if (name === 'stale') loadStale();
@@ -49,6 +50,7 @@ function refreshData() {
       else if (currentPage === 'timeline') loadTimeline();
       else if (currentPage === 'tags') loadTags();
       else if (currentPage === 'duplicates') loadDuplicates();
+      else if (currentPage === 'conflicts') loadConflicts();
       else if (currentPage === 'embedding') loadEmbedding();
       else if (currentPage === 'clusters') loadClusters();
       else if (currentPage === 'stale') loadStale();
@@ -333,7 +335,39 @@ async function loadDuplicates() {
   } catch(e) { el.innerHTML = '<div class="error-state">Error: ' + e.message + '</div>'; }
 }
 
-// ═══════════════════════════════════════════════
+// Conflicts
+
+async function loadConflicts() {
+  const el = document.getElementById('conflict-container');
+  const status = document.getElementById('conflict-status').value;
+  el.innerHTML = '<div class="loading"><div class="spinner"></div><div>Checking explicit claims...</div></div>';
+  try {
+    const params = new URLSearchParams({status, limit: 200});
+    const r = await fetch(API + '/conflicts?' + params.toString());
+    const rows = await r.json();
+    if (!Array.isArray(rows)) throw new Error(rows.error || 'Invalid conflict response');
+    setEl('conflict-count', rows.length + ' records');
+    if (!rows.length) {
+      el.innerHTML = '<div class="empty-state">No ' + (status || '') + ' conflicts</div>';
+      return;
+    }
+    el.innerHTML = rows.map(c =>
+      '<div class="conflict-card conflict-' + (c.status || 'open') + '">' +
+        '<div class="conflict-head"><span class="typed-tag">' + escapeHtml(c.claim_key || 'claim') + '</span>' +
+        '<span class="conflict-subject">' + escapeHtml(c.subject || '') + '</span>' +
+        '<span class="conflict-status">' + escapeHtml(c.status || 'open') + '</span></div>' +
+        '<div class="conflict-pair">' +
+          '<button class="conflict-memory" onclick="showMemoryDetail(\'' + c.memory_a_id + '\')"><b>' + escapeHtml(c.value_a || '') + '</b><span>' + escapeHtml((c.memory_a_content || '').substring(0, 180)) + '</span></button>' +
+          '<span class="conflict-vs">vs</span>' +
+          '<button class="conflict-memory" onclick="showMemoryDetail(\'' + c.memory_b_id + '\')"><b>' + escapeHtml(c.value_b || '') + '</b><span>' + escapeHtml((c.memory_b_content || '').substring(0, 180)) + '</span></button>' +
+        '</div>' +
+      '</div>'
+    ).join('');
+  } catch(e) {
+    el.innerHTML = '<div class="error-state">Error: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
 // Embeddings (UMAP projection)
 // ═══════════════════════════════════════════════
 
