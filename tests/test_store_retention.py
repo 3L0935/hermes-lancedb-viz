@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from plugin.store import LanceDBStore
+from plugin.store import LanceDBStore, route_search_mode
 
 
 def fake_embed(_self, text: str) -> np.ndarray:
@@ -78,6 +78,54 @@ class StoreRetentionTests(unittest.TestCase):
 
         edges = self.store.get_typed_edges(include_unresolved=True)
         self.assertFalse(any(edge["from"] == beta_id or edge["to"] == beta_id for edge in edges))
+
+    def test_router_is_local_and_deterministic(self):
+        self.assertEqual("lexical", route_search_mode('"exact phrase"'))
+        self.assertEqual("graph", route_search_mode("Comment Project:Beta dépend de Project:Alpha ?"))
+        self.assertEqual("hybrid", route_search_mode("configuration audio de mon PC"))
+
+    def test_graph_search_expands_one_hop_with_direct_result_first(self):
+        alpha_id = self.add("Project:Alpha state=active [Tier=2]")
+        beta_id = self.add(
+            "Project:Beta state=active [Tier=2]",
+            relations=[{"type": "depends", "target_id": alpha_id}],
+        )
+        beta = self.store._get_by_id_raw(beta_id)
+        beta.pop("vector", None)
+        beta["score"] = 0.03
+        self.store._search_hybrid = lambda query, top_k, category: [beta]
+
+        results = self.store.search(
+            "Comment Project:Beta dépend de Project:Alpha ?",
+            top_k=2,
+            mode="graph",
+            relation_depth=1,
+        )
+
+        self.assertEqual([beta_id, alpha_id], [result["id"] for result in results])
+        self.assertEqual("direct", results[0]["retrieval_source"])
+        self.assertEqual("relation", results[1]["retrieval_source"])
+        self.assertEqual("depends", results[1]["relation_type"])
+
+    def test_graph_search_respects_total_result_limit(self):
+        alpha_id = self.add("Project:Alpha state=active [Tier=2]")
+        gamma_id = self.add("Project:Gamma state=active [Tier=2]")
+        beta_id = self.add(
+            "Project:Beta state=active [Tier=2]",
+            relations=[
+                {"type": "depends", "target_id": alpha_id},
+                {"type": "uses", "target_id": gamma_id},
+            ],
+        )
+        beta = self.store._get_by_id_raw(beta_id)
+        beta.pop("vector", None)
+        beta["score"] = 0.03
+        self.store._search_hybrid = lambda query, top_k, category: [beta]
+
+        results = self.store.search("what connects beta", top_k=2, mode="graph")
+
+        self.assertEqual(2, len(results))
+        self.assertEqual(beta_id, results[0]["id"])
 
     def test_legacy_edge_schema_adds_target_id_without_losing_rows(self):
         import pyarrow as pa

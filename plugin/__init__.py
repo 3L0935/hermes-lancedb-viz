@@ -50,6 +50,16 @@ _SEARCH_SCHEMA = {
                 "enum": ["", "project", "tech", "fact", "correction", "user_pref", "decision", "insight", "reference", "pattern", "question"],
                 "description": "Optional category filter.",
             },
+            "mode": {
+                "type": "string",
+                "enum": ["auto", "hybrid", "lexical", "graph"],
+                "description": "Local retrieval strategy. auto uses deterministic rules; graph adds bounded one-hop typed relations.",
+            },
+            "relation_depth": {
+                "type": "integer",
+                "enum": [0, 1],
+                "description": "Typed-relation traversal depth. Only 0 or 1 is supported to keep recall bounded.",
+            },
         },
         "required": ["query"],
     },
@@ -94,6 +104,19 @@ _ADD_SCHEMA = {
                 "type": "string",
                 "enum": ["project", "tech", "fact", "correction", "user_pref", "decision", "insight", "reference", "pattern", "question"],
                 "description": "Category for grouping in the graph (default: 'fact'). Priority order: correction > pattern > decision > user_pref > reference > insight > project > tech > fact > question. Pick the highest applicable.",
+            },
+            "relations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string", "enum": ["part_of", "depends", "requires", "runs_on", "connects_to", "uses", "extends", "supersedes", "invalidates", "contradicts"]},
+                        "target_id": {"type": "string"},
+                        "target": {"type": "string"},
+                    },
+                    "required": ["type"],
+                },
+                "description": "Optional typed links. Prefer target_id from lancedb_search; target labels resolve only when unique.",
             },
         },
         "required": [],  # Use EITHER content (legacy) OR domain+subject+tier (+ optional content)
@@ -152,6 +175,19 @@ _UPDATE_SCHEMA = {
             "type": {
                 "type": "string",
                 "description": "New sub-type (granular type within the category).",
+            },
+            "relations": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "type": {"type": "string"},
+                        "target_id": {"type": "string"},
+                        "target": {"type": "string"},
+                    },
+                    "required": ["type"],
+                },
+                "description": "Replacement set of typed links. An empty list clears outgoing relations.",
             },
         },
         "required": ["memory_id"],
@@ -388,10 +424,18 @@ class LanceDBMemoryProvider(MemoryProvider):
 
     def _handle_search(self, args: dict) -> str:
         query = args.get("query", "")
-        top_k = min(int(args.get("top_k", 10)), 50)
+        top_k = min(max(int(args.get("top_k", 10)), 1), 50)
         category = args.get("category", "") or None
+        mode = args.get("mode", "auto")
+        relation_depth = 1 if int(args.get("relation_depth", 1)) > 0 else 0
         try:
-            results = self._store.search(query, top_k=top_k, category=category)
+            results = self._store.search(
+                query,
+                top_k=top_k,
+                category=category,
+                mode=mode,
+                relation_depth=relation_depth,
+            )
             return json.dumps({
                 "query": query,
                 "count": len(results),
@@ -430,7 +474,11 @@ class LanceDBMemoryProvider(MemoryProvider):
         if category not in VALID_CATEGORIES:
             category = "fact"
         try:
-            mem_id = self._store.add(content, category=category)
+            mem_id = self._store.add(
+                content,
+                category=category,
+                relations=args.get("relations") if isinstance(args.get("relations"), list) else None,
+            )
             return json.dumps({
                 "success": True,
                 "memory_id": mem_id,
@@ -486,6 +534,8 @@ class LanceDBMemoryProvider(MemoryProvider):
             update_kwargs["quality"] = float(args["quality"])
         if "type" in args and args["type"]:
             update_kwargs["type"] = args["type"]
+        if "relations" in args and isinstance(args["relations"], list):
+            update_kwargs["relations"] = args["relations"]
 
         if not update_kwargs:
             return tool_error("No fields to update. Provide at least one of: content, category, tags, quality, type.")

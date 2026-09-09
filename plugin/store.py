@@ -205,6 +205,28 @@ def canonical_subject(content: str) -> str:
     first = (content or "").strip().split(None, 1)[0] if (content or "").strip() else ""
     return first.rstrip(":,.;").lower() if ":" in first else ""
 
+
+def route_search_mode(query: str) -> str:
+    """Choose a local retrieval strategy using cheap deterministic rules."""
+    text = (query or "").strip()
+    lower = text.lower()
+    if (
+        (len(text) >= 2 and text[0] == text[-1] == '"')
+        or re.search(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b", lower)
+        or re.search(r"(?:^|\s)(?:~/|/)[^\s]+", text)
+        or any(word in lower for word in ("exact", "verbatim", "littéral", "literal"))
+    ):
+        return "lexical"
+    graph_markers = (
+        "related", "relation", "connected", "connects", "linked", "links",
+        "depends", "dependency", "part of", "requires", "uses",
+        "relié", "relie", "relation", "connecté", "connecte", "dépend",
+        "depend", "dépendance", "dependance", "nécessite", "necessite",
+    )
+    if any(marker in lower for marker in graph_markers):
+        return "graph"
+    return "hybrid"
+
 # ---------------------------------------------------------------------------
 # Entity extraction
 # ---------------------------------------------------------------------------
@@ -844,11 +866,9 @@ class LanceDBStore:
     # Search
     # -----------------------------------------------------------------------
 
-    def search(self, query: str, top_k: int = 10, category: str | None = None) -> list[dict]:
-        """Semantic search using vector + FTS hybrid (BM25).
-        Falls back to pure vector search if FTS index is unavailable.
-
-        LanceDB 0.33 hybrid API: .search(query_type='hybrid').text(q).vector(v)"""
+    def _search_hybrid(self, query: str, top_k: int = 10,
+                       category: str | None = None) -> list[dict]:
+        """Run LanceDB BM25/vector hybrid retrieval."""
         self._fresh()
         vector = self._embed(query)
         try:
@@ -895,6 +915,88 @@ class LanceDBStore:
             except Exception:
                 pass
         return memories
+
+    def _search_lexical(self, query: str, top_k: int = 10,
+                        category: str | None = None) -> list[dict]:
+        """Run BM25-only retrieval, with a deterministic substring fallback."""
+        self._fresh()
+        try:
+            base = self._table.search(query, query_type="fts").limit(top_k)
+            if category:
+                rows = base.where(f"category = '{category}'").to_list()
+            else:
+                rows = base.to_list()
+        except Exception:
+            needle = query.strip().strip('"').lower()
+            rows = [
+                row for row in self._get_all_raw()
+                if needle in (row.get("content") or "").lower()
+                and (not category or row.get("category") == category)
+            ][:top_k]
+
+        memories = []
+        for rank, row in enumerate(rows):
+            memory = dict(row)
+            memory.pop("vector", None)
+            self._parse_json_fields(memory)
+            memory["score"] = float(row.get("_score", 1.0 / (rank + 1)))
+            memories.append(memory)
+        return memories
+
+    def _expand_relation_context(self, direct: list[dict], top_k: int,
+                                 category: str | None = None) -> list[dict]:
+        """Append one-hop typed neighbors while preserving direct-result priority."""
+        results = list(direct[:top_k])
+        seen = {str(memory.get("id")) for memory in results}
+        if len(results) >= top_k:
+            return results
+
+        edges = self.get_typed_edges()
+        for seed in direct:
+            seed_id = str(seed.get("id"))
+            for edge in edges:
+                neighbor_id = ""
+                direction = "outgoing"
+                if edge["from"] == seed_id:
+                    neighbor_id = edge["to"]
+                elif edge["to"] == seed_id:
+                    neighbor_id = edge["from"]
+                    direction = "incoming"
+                if not neighbor_id or neighbor_id in seen:
+                    continue
+                neighbor = self._get_by_id_raw(neighbor_id)
+                if not neighbor or (category and neighbor.get("category") != category):
+                    continue
+                neighbor.pop("vector", None)
+                neighbor["score"] = float(seed.get("score", 0.0)) * 0.8
+                neighbor["retrieval_source"] = "relation"
+                neighbor["relation_type"] = edge["relation_type"]
+                neighbor["relation_direction"] = direction
+                neighbor["relation_seed_id"] = seed_id
+                results.append(neighbor)
+                seen.add(neighbor_id)
+                if len(results) >= top_k:
+                    return results
+        return results
+
+    def search(self, query: str, top_k: int = 10, category: str | None = None,
+               mode: str = "auto", relation_depth: int = 1) -> list[dict]:
+        """Search locally with deterministic routing and optional one-hop expansion."""
+        selected_mode = route_search_mode(query) if mode == "auto" else mode
+        if selected_mode not in {"hybrid", "lexical", "graph"}:
+            selected_mode = "hybrid"
+        seed_limit = max(1, min(5, (top_k + 1) // 2)) if selected_mode == "graph" else top_k
+        direct = (
+            self._search_lexical(query, seed_limit, category)
+            if selected_mode == "lexical"
+            else self._search_hybrid(query, seed_limit, category)
+        )
+        for memory in direct:
+            memory["retrieval_source"] = "direct"
+            memory["search_mode"] = selected_mode
+        if selected_mode == "graph" and relation_depth > 0:
+            return self._expand_relation_context(direct, top_k, category)
+        return direct[:top_k]
 
     def graph(self) -> dict:
         """Return all memories as graph nodes + edges (entity-based links)."""
