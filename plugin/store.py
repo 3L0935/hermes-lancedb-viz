@@ -227,6 +227,24 @@ def route_search_mode(query: str) -> str:
         return "graph"
     return "hybrid"
 
+
+_CLAIM_PATTERN = re.compile(
+    r"(?<![\w.-])([A-Za-z][A-Za-z0-9_.-]*)=(\"[^\"]*\"|'[^']*'|[^\s]+)"
+)
+
+
+def extract_claims(content: str) -> dict[str, str]:
+    """Extract explicit key=value claims for conservative conflict checks."""
+    claims = {}
+    for key, raw_value in _CLAIM_PATTERN.findall(content or ""):
+        key = key.lower()
+        if key == "tier":
+            continue
+        value = raw_value.strip("\"' ,.;").lower()
+        if value:
+            claims[key] = value
+    return claims
+
 # ---------------------------------------------------------------------------
 # Entity extraction
 # ---------------------------------------------------------------------------
@@ -523,6 +541,141 @@ class LanceDBStore:
             logger.warning("Failed to read typed relations: %s", error)
             return []
 
+    def _ensure_conflicts_table(self):
+        """Create or open the deterministic contradiction ledger."""
+        import pyarrow as pa
+        try:
+            table = self._db.open_table("memory_conflicts")
+            try:
+                table.checkout_latest()
+            except Exception:
+                pass
+            return table
+        except Exception:
+            schema = pa.schema([
+                pa.field("id", pa.string()),
+                pa.field("memory_a_id", pa.string()),
+                pa.field("memory_b_id", pa.string()),
+                pa.field("subject", pa.string()),
+                pa.field("claim_key", pa.string()),
+                pa.field("value_a", pa.string()),
+                pa.field("value_b", pa.string()),
+                pa.field("status", pa.string()),
+                pa.field("confidence", pa.float64()),
+                pa.field("created_at", pa.float64()),
+                pa.field("resolved_at", pa.float64()),
+            ])
+            return self._db.create_table("memory_conflicts", schema=schema)
+
+    def detect_conflicts_for(self, memory_id: str) -> list[dict]:
+        """Record explicit same-subject key=value contradictions, without mutation."""
+        from uuid import uuid4
+
+        current = self._get_by_id_raw(memory_id)
+        if not current:
+            return []
+        subject = canonical_subject(current.get("content", ""))
+        claims = extract_claims(current.get("content", ""))
+        if not subject or not claims:
+            return []
+
+        relevant_categories = {"decision", "correction", "project", "user_pref", "tech", "fact"}
+        if current.get("category") not in relevant_categories:
+            return []
+
+        table = self._ensure_conflicts_table()
+        existing_rows = table.to_arrow().to_pylist()
+        existing_by_key = {
+            (frozenset((row["memory_a_id"], row["memory_b_id"])), row["claim_key"]): row
+            for row in existing_rows
+        }
+        created = []
+        to_insert = []
+        now = time.time()
+        for other in self._get_all_raw():
+            other_id = str(other["id"])
+            if other_id == memory_id or other.get("category") not in relevant_categories:
+                continue
+            if canonical_subject(other.get("content", "")) != subject:
+                continue
+            other_claims = extract_claims(other.get("content", ""))
+            for claim_key in sorted(set(claims) & set(other_claims)):
+                if claims[claim_key] == other_claims[claim_key]:
+                    continue
+                dedupe_key = (frozenset((memory_id, other_id)), claim_key)
+                existing = existing_by_key.get(dedupe_key)
+                if existing:
+                    if existing.get("status") == "open":
+                        continue
+                    if existing["memory_a_id"] == other_id:
+                        values = {
+                            "value_a": other_claims[claim_key],
+                            "value_b": claims[claim_key],
+                        }
+                    else:
+                        values = {
+                            "value_a": claims[claim_key],
+                            "value_b": other_claims[claim_key],
+                        }
+                    values.update({
+                        "status": "open",
+                        "created_at": now,
+                        "resolved_at": 0.0,
+                    })
+                    table.update(f"id = '{existing['id']}'", values)
+                    existing.update(values)
+                    created.append(dict(existing))
+                    continue
+                row = {
+                    "id": str(uuid4())[:12],
+                    "memory_a_id": other_id,
+                    "memory_b_id": memory_id,
+                    "subject": subject,
+                    "claim_key": claim_key,
+                    "value_a": other_claims[claim_key],
+                    "value_b": claims[claim_key],
+                    "status": "open",
+                    "confidence": 1.0,
+                    "created_at": now,
+                    "resolved_at": 0.0,
+                }
+                created.append(row)
+                to_insert.append(row)
+                existing_by_key[dedupe_key] = row
+        if to_insert:
+            table.add(to_insert)
+        return created
+
+    def get_conflicts(self, status: str = "", limit: int = 100,
+                      memory_id: str = "") -> list[dict]:
+        """List contradiction records with current memory content for inspection."""
+        table = self._ensure_conflicts_table()
+        rows = table.to_arrow().to_pylist()
+        memories = {str(row["id"]): row for row in self._get_all_raw()}
+        result = []
+        for row in rows:
+            if status and row.get("status") != status:
+                continue
+            if memory_id and memory_id not in {row.get("memory_a_id"), row.get("memory_b_id")}:
+                continue
+            item = dict(row)
+            item["memory_a_content"] = (memories.get(item["memory_a_id"], {}).get("content") or "")
+            item["memory_b_content"] = (memories.get(item["memory_b_id"], {}).get("content") or "")
+            result.append(item)
+        result.sort(key=lambda item: item.get("created_at", 0), reverse=True)
+        return result[:max(1, min(int(limit), 500))]
+
+    def _close_conflicts_for_memory(self, memory_id: str) -> None:
+        """Close open conflicts before a memory's claims are rewritten."""
+        try:
+            table = self._ensure_conflicts_table()
+            table.update(
+                f"(memory_a_id = '{memory_id}' OR memory_b_id = '{memory_id}') AND status = 'open'",
+                {"status": "resolved", "resolved_at": time.time()},
+            )
+        except Exception as error:
+            logger.warning("Failed to close conflicts for %s: %s", memory_id, error)
+
     # -----------------------------------------------------------------------
     # Embedding
     # -----------------------------------------------------------------------
@@ -642,6 +795,9 @@ class LanceDBStore:
             {"relations": json.dumps(normalized_relations)},
         )
 
+        # Conservative local contradiction check. This never mutates memories.
+        self.detect_conflicts_for(mem_id)
+
         self._update_db_size()
 
         return mem_id
@@ -692,6 +848,10 @@ class LanceDBStore:
             if updates:
                 updates["updated_at"] = now
                 self._table.update(f"id = '{memory_id}'", updates)
+
+            if "content" in updates:
+                self._close_conflicts_for_memory(memory_id)
+                self.detect_conflicts_for(memory_id)
 
             if relations_to_replace is not None:
                 normalized_relations = self._write_relations_list(memory_id, relations_to_replace)

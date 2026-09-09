@@ -127,6 +127,49 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertEqual(2, len(results))
         self.assertEqual(beta_id, results[0]["id"])
 
+    def test_conflicting_explicit_claims_are_recorded_once(self):
+        first_id = self.add("Project:Alpha port=7777 state=active [Tier=2]")
+        second_id = self.add("Project:Alpha port=7778 state=active [Tier=2]")
+
+        conflicts = self.store.get_conflicts(status="open")
+
+        self.assertEqual(1, len(conflicts))
+        self.assertEqual({first_id, second_id}, {conflicts[0]["memory_a_id"], conflicts[0]["memory_b_id"]})
+        self.assertEqual("port", conflicts[0]["claim_key"])
+        self.assertEqual({"7777", "7778"}, {conflicts[0]["value_a"], conflicts[0]["value_b"]})
+        self.assertEqual("open", conflicts[0]["status"])
+        self.store.detect_conflicts_for(second_id)
+        self.assertEqual(1, len(self.store.get_conflicts(status="open")))
+
+    def test_updating_claims_closes_stale_conflicts_and_rechecks(self):
+        self.add("Project:Alpha port=7777 [Tier=2]")
+        second_id = self.add("Project:Alpha port=7778 [Tier=2]")
+        self.assertEqual(1, len(self.store.get_conflicts(status="open")))
+
+        self.store.update(second_id, content="Project:Alpha port=7777 [Tier=2]")
+
+        self.assertEqual([], self.store.get_conflicts(status="open"))
+        self.assertEqual(1, len(self.store.get_conflicts(status="resolved")))
+
+    def test_reintroduced_claim_conflict_reopens_ledger_record(self):
+        self.add("Project:Alpha port=7777 [Tier=2]")
+        second_id = self.add("Project:Alpha port=7778 [Tier=2]")
+        self.store.update(second_id, content="Project:Alpha port=7777 [Tier=2]")
+        self.store.update(second_id, content="Project:Alpha port=7779 [Tier=2]")
+
+        self.assertEqual(1, len(self.store.get_conflicts(status="open")))
+        self.assertEqual("7779", self.store.get_conflicts(status="open")[0]["value_b"])
+
+    def test_unrelated_subjects_do_not_create_conflicts(self):
+        self.add("Project:Alpha port=7777 [Tier=2]")
+        self.add("Project:Beta port=7778 [Tier=2]")
+        self.assertEqual([], self.store.get_conflicts())
+
+    def test_equal_claim_values_do_not_create_conflicts(self):
+        self.add("Project:Alpha port=7777 owner=elo [Tier=2]")
+        self.add("Project:Alpha port=7777 state=active [Tier=2]")
+        self.assertEqual([], self.store.get_conflicts())
+
     def test_legacy_edge_schema_adds_target_id_without_losing_rows(self):
         import pyarrow as pa
 

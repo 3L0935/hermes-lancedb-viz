@@ -269,6 +269,36 @@ _LIST_SCHEMA = {
     },
 }
 
+_CONFLICTS_SCHEMA = {
+    "name": "lancedb_conflicts",
+    "description": (
+        "List conservative local contradiction records. Conflicts are created only "
+        "when memories with the same Domain:Subject key contain different explicit "
+        "key=value claims. Detection is deterministic and never mutates either memory."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "status": {
+                "type": "string",
+                "enum": ["", "open", "resolved"],
+                "description": "Filter by state; empty returns all records.",
+            },
+            "memory_id": {
+                "type": "string",
+                "description": "Optional memory ID to inspect.",
+            },
+            "limit": {
+                "type": "integer",
+                "default": 100,
+                "description": "Maximum rows to return (1-500).",
+            },
+        },
+        "required": [],
+    },
+}
+
+
 # ---------------------------------------------------------------------------
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
@@ -399,7 +429,10 @@ class LanceDBMemoryProvider(MemoryProvider):
         pass
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [_SEARCH_SCHEMA, _ADD_SCHEMA, _GRAPH_SCHEMA, _DELETE_SCHEMA, _UPDATE_SCHEMA, _GET_SCHEMA, _LIST_SCHEMA]
+        return [
+            _SEARCH_SCHEMA, _ADD_SCHEMA, _GRAPH_SCHEMA, _DELETE_SCHEMA,
+            _UPDATE_SCHEMA, _GET_SCHEMA, _LIST_SCHEMA, _CONFLICTS_SCHEMA,
+        ]
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         if tool_name == "lancedb_search":
@@ -416,6 +449,8 @@ class LanceDBMemoryProvider(MemoryProvider):
             return self._handle_get(args)
         elif tool_name == "lancedb_list":
             return self._handle_list(args)
+        elif tool_name == "lancedb_conflicts":
+            return self._handle_conflicts(args)
         return tool_error(f"Unknown tool: {tool_name}")
 
     # -------------------------------------------------------------------
@@ -479,9 +514,13 @@ class LanceDBMemoryProvider(MemoryProvider):
                 category=category,
                 relations=args.get("relations") if isinstance(args.get("relations"), list) else None,
             )
+            potential_conflicts = self._store.get_conflicts(
+                status="open", memory_id=mem_id, limit=20
+            )
             return json.dumps({
                 "success": True,
                 "memory_id": mem_id,
+                "potential_conflicts": potential_conflicts,
                 "message": f"Memory stored: {content[:80]}...",
             }, ensure_ascii=False)
         except Exception as e:
@@ -621,6 +660,23 @@ class LanceDBMemoryProvider(MemoryProvider):
                 "offset": offset,
                 "limit": limit,
                 "results": page,
+            }, ensure_ascii=False, default=str)
+        except Exception as e:
+            return tool_error(str(e))
+
+    def _handle_conflicts(self, args: dict) -> str:
+        try:
+            status = args.get("status", "")
+            if status not in {"", "open", "resolved"}:
+                return tool_error("status must be empty, open, or resolved")
+            conflicts = self._store.get_conflicts(
+                status=status,
+                memory_id=args.get("memory_id", ""),
+                limit=min(max(int(args.get("limit", 100)), 1), 500),
+            )
+            return json.dumps({
+                "count": len(conflicts),
+                "conflicts": conflicts,
             }, ensure_ascii=False, default=str)
         except Exception as e:
             return tool_error(str(e))
