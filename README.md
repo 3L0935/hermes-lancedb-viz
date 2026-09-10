@@ -12,8 +12,9 @@ A complete memory system for Hermes Agent that persists across sessions:
   search, add, update, delete, get, list, graph, conflicts. Auto entity extraction,
   auto-tagging, quality decay, target-ID relations, local query routing, one-hop
   graph recall, and deterministic contradiction detection.
-- **Visualizer** (`server/` + `static/`) - lightweight web UI, normally run as a
-  user systemd service on port 7778. 10 pages: Dashboard, Memories, Timeline,
+- **Visualizer** (`server/` + `static/`) - lightweight web UI, normally run in
+  Docker on port 7777, with an optional systemd fallback on port 7778. 10 pages:
+  Dashboard, Memories, Timeline,
   Tags, Duplicates, Conflicts, Embeddings, Clusters, Stale, and Graph.
 - **Scripts** (`scripts/`) - relation migration, contradiction backfill,
   re-embedding, duplicate consolidation, and verification.
@@ -36,13 +37,15 @@ this repository's `plugin/` directory.
 
 ```
 Agent → MCP tools (lancedb_search, lancedb_add, lancedb_update, ...)
-  → LanceDBStore (store.py)
-    → LanceDB table (memories + vectors)
-    → Ollama /api/embed (nomic-embed-text, 768-dim)
-    → Entity extraction + auto-tagging
-    -> BM25 index (Tantivy FTS)
-    -> memory_edges table (typed relations with concrete target IDs)
-    -> memory_conflicts table (non-destructive key=value contradictions)
+  → MemoryWrite / MemoryPatch
+    → memory_contract.py (normalize, validate, fingerprint, render)
+      → LanceDBStore preflight (idempotency, subject match, conflicts)
+        → Ollama /api/embed (nomic-embed-text, 768-dim)
+          → Entity extraction + auto-tagging
+            → LanceDB table (memories + vectors)
+            → BM25 index (Tantivy FTS)
+            → memory_edges table (typed relations with concrete target IDs)
+            → memory_conflicts table (non-destructive key=value contradictions)
 ```
 
 Search defaults to a deterministic local router: exact strings and identifiers
@@ -56,8 +59,8 @@ model call and no service.
 - **Ollama** running on localhost:11434
 - **nomic-embed-text** model pulled: `ollama pull nomic-embed-text`
 - **Python 3.11+** with `lancedb`, `pyarrow`, `httpx`, `numpy`
-- **systemd user services** for the default visualizer deployment
-- **Docker** only if you prefer the optional container deployment
+- **Docker** for the primary visualizer deployment
+- **systemd user services** only for the optional fallback deployment
 
 ## Quick Start
 
@@ -73,8 +76,9 @@ ollama pull nomic-embed-text
 ```bash
 mkdir -p ~/.hermes/plugins/lancedb \
   ~/.hermes/hermes-agent/plugins/memory/lancedb
-cp plugin/{store.py,__init__.py,plugin.yaml} ~/.hermes/plugins/lancedb/
-cp plugin/{store.py,__init__.py,plugin.yaml} \
+cp plugin/{store.py,memory_contract.py,__init__.py,plugin.yaml} \
+  ~/.hermes/plugins/lancedb/
+cp plugin/{store.py,memory_contract.py,__init__.py,plugin.yaml} \
   ~/.hermes/hermes-agent/plugins/memory/lancedb/
 
 cd ~/.hermes/hermes-agent
@@ -102,7 +106,10 @@ hermes tools | grep lancedb
 
 ### 4. Deploy the visualizer
 
-The primary UI is the Docker container `lancedb-viz` on port 7777, launched by the Hermes Hub compose file (`~/github/hermes-hub/services/lancedb-viz/`) and bound to the files deployed by `deploy-local.sh` (see docs/setup.md). It starts automatically with Docker.
+The primary UI is the `lancedb-viz` Docker container on port 7777.
+`deploy-local.sh` synchronizes repository files into both plugin locations and
+the visualizer directory, then restarts that container. Use
+`--systemd-fallback` to target the optional service on port 7778 instead.
 
 ```bash
 ./scripts/deploy-local.sh --dry-run
@@ -120,26 +127,94 @@ The plugin exposes 8 tools to the Hermes agent:
 | Tool | Purpose |
 |------|---------|
 | `lancedb_search` | Auto-routed lexical, hybrid, or one-hop graph recall. Supports explicit `mode` and `relation_depth`. |
-| `lancedb_add` | Store a memory and optional typed relations. Reports new potential conflicts. |
-| `lancedb_update` | Edit a memory in place, re-embed changed content, and replace relations safely. |
+| `lancedb_add` | Create a validated memory from structured fields. Exact retries are idempotent; same-subject writes are preflighted before embedding. |
+| `lancedb_update` | Replace a memory by ID from its complete structured form, re-embed changed content, and echo the replaced content. |
 | `lancedb_delete` | Delete a memory and clean incoming and outgoing typed edges. |
 | `lancedb_get` | Get a single memory by ID with all fields. |
 | `lancedb_list` | Exact listing with category, tier, and quality filters. |
 | `lancedb_graph` | Export the memory graph. |
 | `lancedb_conflicts` | List deterministic same-subject `key=value` contradictions. |
 
-### Memory format
+### Strict write contract
+
+`lancedb_add` and `lancedb_update` accept structured data. Callers must not
+construct or parse the persisted string themselves.
+
+```json
+{
+  "domain": "Project",
+  "subject": "ApiGateway",
+  "facts": ["transport=SSE", "port=7777", "reconnect uses exponential backoff"],
+  "tier": 2,
+  "category": "tech",
+  "relations": [{"type": "depends", "target_id": "memory-id"}]
+}
+```
+
+The five fields `domain`, `subject`, `facts`, `tier`, and `category` are
+required. Facts may be dense `key=value` claims or concise single-sentence
+prose. Current limits are 12 facts, 1,000 characters per fact, and 2,000
+characters across all facts. These limits were selected against existing data;
+the measured distribution and rationale are documented in
+`plugin/memory_contract.py`.
+
+- **Tier 1**: correction, safety rule, critical command, or recurring failure.
+- **Tier 2**: reusable configuration, architecture, endpoint, or workflow fact.
+- **Tier 3**: durable background context.
+- **Categories**: `project`, `tech`, `fact`, `correction`, `user_pref`,
+  `decision`, `insight`, `reference`, `pattern`, and `question`.
+- **Relations**: `part_of`, `depends`, `requires`, `runs_on`, `connects_to`,
+  `uses`, `extends`, `supersedes`, `invalidates`, and `contradicts`.
+
+The contract normalizes labels and whitespace, rejects embedded tier or
+relation markers, validates categories and relations, and renders the internal
+canonical representation:
 
 ```
-Domain:Subject key=value key=value. [Tier=N]
-::relations:: type=target | type=target2
+Domain:Subject fact one. fact two. [Tier=N]
 ```
 
-- **Domain**: Namespace (Hermes, Project, Tech, User, Correction, Config, etc.)
-- **Subject**: Specific subject within the domain
-- **Tier**: 1=critical (bugs, corrections), 2=useful (stack, URLs), 3=contextual
-- **Category**: project, tech, fact, correction, user_pref, decision, insight, reference, pattern, question
-- **Relations**: Optional typed links (`part_of`, `depends`, `requires`, `runs_on`, `connects_to`, `uses`, `extends`, `supersedes`, `invalidates`, `contradicts`). Prefer structured relations with a `target_id`; a short target label is resolved only when unique.
+Typed relations are persisted separately. The legacy `::relations::` syntax is
+accepted only by fenced import and migration adapters, not by agent tools.
+
+#### Non-destructive add behavior
+
+`write_mode` defaults to `create`:
+
+| Preflight result | Tool result |
+|------------------|-------------|
+| Exact canonical fingerprint already exists | `success: true`, `status: idempotent`, existing `memory_id` |
+| Same subject, no conflicting explicit claim | `success: false`, `status: update_suggested`, existing ID and content |
+| Same subject, conflicting `key=value` claim | Blocked with `error.code: conflicting_claims` |
+| New subject | `success: true`, `status: created` |
+
+`write_mode="upsert_subject"` is explicit and only succeeds when exactly one
+non-conflicting same-subject memory exists. Its response includes
+`replaced_content`. For intentional claim corrections, use `lancedb_update`
+with a known memory ID. No write path silently merges or overwrites content.
+
+Generic subjects are accepted with an `overly_broad_subject` warning because
+they increase false conflict matches. Embedding failures are retryable errors
+and never create a zero-vector row.
+
+Validation failures use a stable machine-readable shape:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "invalid_category",
+    "field": "category",
+    "message": "category is not supported",
+    "received": "note",
+    "expected": ["project", "tech", "fact"]
+  },
+  "retryable": false
+}
+```
+
+The `expected` value may contain the full supported set; it is abbreviated in
+this example. Successful and preflight responses echo `canonical_content`.
 
 See [docs/skills/memory-writing.md](docs/skills/memory-writing.md) for the full writing guide.
 
@@ -174,7 +249,7 @@ LanceDB native hybrid retrieval combines BM25 (Tantivy FTS) and vector cosine th
 
 ## Visualizer
 
-Lightweight systemd service with 10 pages:
+Lightweight web UI with 10 pages:
 
 - **Dashboard** — total memories, category breakdown, tier distribution, top accessed
 - **Memories** — paginated list (20/page) with filters (category, type, tag, quality, date, search)
@@ -215,12 +290,52 @@ POST /api/export | import
 
 ### deploy-local.sh
 
-Synchronizes the repository into the canonical user plugin, the runtime compatibility copy, and the systemd visualizer deployment. It does not restart the Hermes gateway.
+Synchronizes the repository into the canonical user plugin, the runtime
+compatibility copy, and the visualizer deployment. It does not restart the
+Hermes gateway. By default it restarts and verifies Docker on port 7777; pass
+`--systemd-fallback` to restart and verify the optional service on port 7778.
 
 ```bash
 ./scripts/deploy-local.sh --dry-run
 ./scripts/deploy-local.sh
+./scripts/deploy-local.sh --dry-run --systemd-fallback
 ```
+
+### audit-memory-format.py
+
+Reads `id`, `content`, and `category` directly from an existing LanceDB table
+and emits a JSON drift report. It never repairs rows. Use `--fail-on-drift` to
+return exit code 1 when invalid or non-canonical content is found.
+
+```bash
+python3 scripts/audit-memory-format.py --db-path /path/to/lancedb --pretty
+python3 scripts/audit-memory-format.py --db-path /path/to/lancedb --fail-on-drift
+```
+
+### migrate-memory-format.py
+
+Builds and verifies a database copy under a dedicated `/tmp` directory, then
+classifies rows as `canonical`, `safe_normalize`, `manual_review`, or
+`warning_only`. Dry-run is the default. `--apply` creates a second verified
+backup and applies safe normalization to the working copy only; it never
+writes to `--source-db`.
+
+```bash
+python3 scripts/migrate-memory-format.py \
+  --source-db /path/to/lancedb \
+  --work-dir /tmp/memory-format-review \
+  --pretty
+
+python3 scripts/migrate-memory-format.py \
+  --source-db /path/to/lancedb \
+  --work-dir /tmp/memory-format-apply \
+  --apply --pretty
+```
+
+Review the JSON report and test the copied database before planning a separate
+live migration. This hardening does not promote `domain`, `subject`, or `facts`
+to LanceDB columns; the current table schema is unchanged. Any future schema
+migration must use create, copy, verify, and drop—not `rename_table()`.
 
 ### migrate_graph_retention.py
 
@@ -259,9 +374,10 @@ Behavior:
 - Deletes duplicates with exact content match (safe auto-merge)
 - Skips duplicates with different content (needs manual review)
 
-## Optional Docker deployment
+## Docker deployment
 
-The repository retains Docker support for portable deployments. The default low-footprint local pipeline uses `lancedb-viz.service` on port 7778 instead.
+Docker on port 7777 is the primary visualizer deployment. The repository also
+ships `systemd/lancedb-viz.service` as an optional local fallback on port 7778.
 
 ```yaml
 # docker-compose.yml
