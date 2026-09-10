@@ -25,9 +25,9 @@ Architecture et déploiement du stockage vectoriel local.
 ~/.config/systemd/user/lancedb-viz.service      <- unit systemd (versionnee dans le repo)
 ```
 
-**Viz** : **Docker container `lancedb-viz` sur port 7777 = UI canonique pour elo** (decision 10/09/2026, pointé par le Hermes Hub). Le 7778 systemd (deploy-local.sh) = doublon de secours, PAS l'accès principal.
-**Pitfall restart 7777** : le container sert le code du repo par bind mounts (static:ro, server.py:ro) mais le process Python ne recharge pas tout seul — **`docker restart lancedb-viz` obligatoire après toute modif server.py** (sinon nouvel endpoint → fallback HTML → "Unexpected token '<'" côté frontend). static/ seul = pas de restart.
-Deploy + sync : `./scripts/deploy-local.sh` depuis le repo (unit systemd 7778). Docker legacy (7777) = référence UI.
+**Viz** : le conteneur Docker `lancedb-viz` sur le port 7777 est l'interface principale. L'unité systemd sur le port 7778 est un fallback optionnel.
+**Redémarrage** : le conteneur sert les fichiers du dépôt par bind mounts, mais le processus Python ne recharge pas `server.py` automatiquement. Redémarrer le conteneur après une modification du serveur ; les fichiers statiques n'en ont pas besoin.
+**Déploiement** : `./scripts/deploy-local.sh` synchronise les fichiers puis redémarre Docker par défaut. Utiliser `--systemd-fallback` pour cibler l'unité sur le port 7778.
 **Store** : plugin memory du repo Hermes — `memory.provider: lancedb` dans config.yaml.
 **Frontend** : SPA 10 pages en vanilla JS dans `static/`. Liste paginee (20/page), timeline, tags, duplicates, conflicts, embedding scatter plot, clusters, stale, graph (vis-network).
 
