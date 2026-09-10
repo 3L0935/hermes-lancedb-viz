@@ -210,11 +210,12 @@ def route_search_mode(query: str) -> str:
     """Choose a local retrieval strategy using cheap deterministic rules."""
     text = (query or "").strip()
     lower = text.lower()
+    lexical_markers = ("exact", "verbatim", "littéral", "literal")
     if (
         (len(text) >= 2 and text[0] == text[-1] == '"')
         or re.search(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b", lower)
         or re.search(r"(?:^|\s)(?:~/|/)[^\s]+", text)
-        or any(word in lower for word in ("exact", "verbatim", "littéral", "literal"))
+        or any(re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", lower) for marker in lexical_markers)
     ):
         return "lexical"
     graph_markers = (
@@ -223,7 +224,7 @@ def route_search_mode(query: str) -> str:
         "relié", "relie", "relation", "connecté", "connecte", "dépend",
         "depend", "dépendance", "dependance", "nécessite", "necessite",
     )
-    if any(marker in lower for marker in graph_markers):
+    if any(re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", lower) for marker in graph_markers):
         return "graph"
     return "hybrid"
 
@@ -317,7 +318,7 @@ class LanceDBStore:
 
     @property
     def db_size(self) -> int:
-        return self._db_size
+        return self._compute_db_size()
 
     # -----------------------------------------------------------------------
     # Schema
@@ -437,9 +438,13 @@ class LanceDBStore:
             if "target_id" not in table.schema.names:
                 table.add_columns(pa.field("target_id", pa.string()))
                 table.checkout_latest()
+            if "edge_key" not in table.schema.names:
+                table.add_columns(pa.field("edge_key", pa.string()))
+                table.checkout_latest()
             return table
         except Exception:
             schema = pa.schema([
+                pa.field("edge_key", pa.string()),
                 pa.field("source_id", pa.string()),
                 pa.field("relation_type", pa.string()),
                 pa.field("target_id", pa.string()),
@@ -471,12 +476,15 @@ class LanceDBStore:
         return (matches[0], target_label) if len(matches) == 1 else ("", target_label)
 
     def _replace_relations(self, mem_id: str, relations: list[dict]) -> list[dict]:
-        """Replace all outgoing relations for a memory and return normalized rows."""
+        """Atomically replace outgoing relations and verify the committed state."""
+        import hashlib
+        import pyarrow as pa
+
         table = self._ensure_edges_table()
-        table.delete(f"source_id = '{mem_id}'")
         normalized = []
         now = time.time()
         rows = []
+        seen = set()
         for relation in relations:
             if not isinstance(relation, dict):
                 continue
@@ -486,6 +494,10 @@ class LanceDBStore:
             target_id, target_label = self._resolve_relation_target(relation)
             if not target_id and not target_label:
                 continue
+            logical_key = (relation_type, target_id, target_label)
+            if logical_key in seen:
+                continue
+            seen.add(logical_key)
             normalized_relation = {
                 "type": relation_type,
                 "target_id": target_id,
@@ -493,23 +505,54 @@ class LanceDBStore:
             }
             normalized.append(normalized_relation)
             rows.append({
+                "edge_key": hashlib.sha256(
+                    "\x1f".join((mem_id, relation_type, target_id, target_label)).encode("utf-8")
+                ).hexdigest(),
                 "source_id": mem_id,
                 "relation_type": relation_type,
                 "target_id": target_id,
                 "target_label": target_label,
                 "created_at": now,
             })
-        if rows:
-            table.add(rows)
+
+        source = pa.Table.from_pylist(rows, schema=table.schema)
+        (
+            table.merge_insert("edge_key")
+            .when_matched_update_all()
+            .when_not_matched_insert_all()
+            .when_not_matched_by_source_delete(f"source_id = '{mem_id}'")
+            .execute(source)
+        )
+        table.checkout_latest()
+        committed = table.search().where(f"source_id = '{mem_id}'").to_list()
+        committed_keys = {
+            (
+                str(row.get("relation_type") or ""),
+                str(row.get("target_id") or ""),
+                str(row.get("target_label") or ""),
+            )
+            for row in committed
+        }
+        if len(committed) != len(rows) or committed_keys != seen:
+            raise RuntimeError(f"Relation replacement postcondition failed for {mem_id}")
         return normalized
 
-    def _cleanup_edges_for_memory(self, mem_id: str) -> None:
-        """Remove every incoming and outgoing typed edge for a memory."""
+    def _cleanup_edges_for_memory(self, mem_id: str) -> bool:
+        """Atomically remove incoming/outgoing edges and verify the result."""
         try:
             table = self._ensure_edges_table()
             table.delete(f"source_id = '{mem_id}' OR target_id = '{mem_id}'")
+            table.checkout_latest()
+            remaining = table.search().where(
+                f"source_id = '{mem_id}' OR target_id = '{mem_id}'"
+            ).limit(1).to_list()
+            if remaining:
+                logger.error("Relation cleanup postcondition failed for %s", mem_id)
+                return False
+            return True
         except Exception as error:
             logger.warning("Failed to clean relations for %s: %s", mem_id, error)
+            return False
 
     def _write_relations(self, mem_id: str, content: str):
         """Compatibility wrapper for relation blocks embedded in content."""
@@ -688,7 +731,8 @@ class LanceDBStore:
         result.sort(key=lambda item: item.get("created_at", 0), reverse=True)
         return result[:max(1, min(int(limit), 500))]
 
-    def _close_conflicts_for_memory(self, memory_id: str) -> None:
+    def _close_conflicts_for_memory(self, memory_id: str,
+                                    reason: str = "claims changed") -> bool:
         """Close open conflicts before a memory's claims are rewritten."""
         try:
             table = self._ensure_conflicts_table()
@@ -698,12 +742,49 @@ class LanceDBStore:
                     "status": "resolved",
                     "resolved_at": time.time(),
                     "resolution_type": "auto",
-                    "resolution_note": "claims changed",
+                    "resolution_note": reason,
                     "resolved_by": "system",
                 },
             )
+            return True
         except Exception as error:
             logger.warning("Failed to close conflicts for %s: %s", memory_id, error)
+            return False
+
+    def resolve_conflict(self, conflict_id: str, resolution_note: str,
+                         resolved_by: str = "user") -> bool:
+        """Resolve an open conflict while preserving an explicit audit trail."""
+        if not conflict_id or not resolution_note.strip() or not resolved_by.strip():
+            return False
+        table = self._ensure_conflicts_table()
+        row = next(
+            (item for item in table.to_arrow().to_pylist() if item.get("id") == conflict_id),
+            None,
+        )
+        if not row or row.get("status") != "open":
+            return False
+        table.update(
+            f"id = '{row['id']}' AND status = 'open'",
+            {
+                "status": "resolved",
+                "resolved_at": time.time(),
+                "resolution_type": "human",
+                "resolution_note": resolution_note.strip(),
+                "resolved_by": resolved_by.strip(),
+            },
+        )
+        table.checkout_latest()
+        updated = next(
+            (item for item in table.to_arrow().to_pylist() if item.get("id") == conflict_id),
+            None,
+        )
+        return bool(
+            updated
+            and updated.get("status") == "resolved"
+            and updated.get("resolution_type") == "human"
+            and updated.get("resolution_note") == resolution_note.strip()
+            and updated.get("resolved_by") == resolved_by.strip()
+        )
 
     # -----------------------------------------------------------------------
     # Embedding
@@ -881,12 +962,15 @@ class LanceDBStore:
             if not updates and relations_to_replace is None:
                 return False
 
+            claims_may_change = "content" in updates or "category" in updates
+            if claims_may_change and not self._close_conflicts_for_memory(memory_id):
+                return False
+
             if updates:
                 updates["updated_at"] = now
                 self._table.update(f"id = '{memory_id}'", updates)
 
-            if "content" in updates:
-                self._close_conflicts_for_memory(memory_id)
+            if claims_may_change:
                 self.detect_conflicts_for(memory_id)
 
             if relations_to_replace is not None:
@@ -912,8 +996,11 @@ class LanceDBStore:
             existing = self._table.search().where(f"id = '{memory_id}'").limit(1).to_list()
             if not existing:
                 return False
+            if not self._close_conflicts_for_memory(memory_id, reason="memory deleted"):
+                return False
+            if not self._cleanup_edges_for_memory(memory_id):
+                return False
             self._table.delete(f"id = '{memory_id}'")
-            self._cleanup_edges_for_memory(memory_id)
             self._rebuild_all_links()
             self._update_db_size()
             return True
@@ -1147,7 +1234,16 @@ class LanceDBStore:
         if len(results) >= top_k:
             return results
 
-        edges = self.get_typed_edges()
+        edges = sorted(
+            self.get_typed_edges(),
+            key=lambda edge: (
+                str(edge.get("from", "")),
+                str(edge.get("to", "")),
+                str(edge.get("relation_type", "")),
+                str(edge.get("target_label", "")),
+                float(edge.get("created_at", 0.0)),
+            ),
+        )
         for seed in direct:
             seed_id = str(seed.get("id"))
             for edge in edges:
@@ -1181,15 +1277,26 @@ class LanceDBStore:
         selected_mode = route_search_mode(query) if mode == "auto" else mode
         if selected_mode not in {"hybrid", "lexical", "graph"}:
             selected_mode = "hybrid"
-        seed_limit = max(1, min(5, (top_k + 1) // 2)) if selected_mode == "graph" else top_k
+        seed_limit = (
+            max(1, min(5, (top_k + 1) // 2))
+            if selected_mode == "graph" and relation_depth > 0
+            else top_k
+        )
         direct = (
             self._search_lexical(query, seed_limit, category)
             if selected_mode == "lexical"
             else self._search_hybrid(query, seed_limit, category)
         )
+        routing_fallback = ""
+        if selected_mode == "lexical" and not direct:
+            direct = self._search_hybrid(query, seed_limit, category)
+            selected_mode = "hybrid"
+            routing_fallback = "lexical_empty"
         for memory in direct:
             memory["retrieval_source"] = "direct"
             memory["search_mode"] = selected_mode
+            if routing_fallback:
+                memory["routing_fallback"] = routing_fallback
         if selected_mode == "graph" and relation_depth > 0:
             return self._expand_relation_context(direct, top_k, category)
         return direct[:top_k]

@@ -272,13 +272,19 @@ _LIST_SCHEMA = {
 _CONFLICTS_SCHEMA = {
     "name": "lancedb_conflicts",
     "description": (
-        "List conservative local contradiction records. Conflicts are created only "
+        "List or resolve conservative local contradiction records. Conflicts are created only "
         "when memories with the same Domain:Subject key contain different explicit "
         "key=value claims. Detection is deterministic and never mutates either memory."
     ),
     "parameters": {
         "type": "object",
         "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["list", "resolve"],
+                "default": "list",
+                "description": "List conflicts or resolve one with an audit note.",
+            },
             "status": {
                 "type": "string",
                 "enum": ["", "open", "resolved"],
@@ -292,6 +298,18 @@ _CONFLICTS_SCHEMA = {
                 "type": "integer",
                 "default": 100,
                 "description": "Maximum rows to return (1-500).",
+            },
+            "conflict_id": {
+                "type": "string",
+                "description": "Conflict ID required by the resolve action.",
+            },
+            "resolution_note": {
+                "type": "string",
+                "description": "Required audit note explaining a resolution.",
+            },
+            "resolved_by": {
+                "type": "string",
+                "description": "Actor recorded in the audit trail (default: user).",
             },
         },
         "required": [],
@@ -675,6 +693,32 @@ class LanceDBMemoryProvider(MemoryProvider):
 
     def _handle_conflicts(self, args: dict) -> str:
         try:
+            action = args.get("action", "list")
+            if action == "resolve":
+                conflict_id = str(args.get("conflict_id") or "").strip()
+                resolution_note = str(args.get("resolution_note") or "").strip()
+                resolved_by = str(args.get("resolved_by") or "user").strip()
+                if not conflict_id:
+                    return tool_error("conflict_id is required for resolve")
+                if not resolution_note:
+                    return tool_error("resolution_note is required for resolve")
+                if not resolved_by:
+                    return tool_error("resolved_by is required for resolve")
+                ok = self._store.resolve_conflict(
+                    conflict_id,
+                    resolution_note=resolution_note,
+                    resolved_by=resolved_by,
+                )
+                if not ok:
+                    return tool_error("Conflict not found or already resolved")
+                return json.dumps({
+                    "success": True,
+                    "conflict_id": conflict_id,
+                    "resolution_note": resolution_note,
+                    "resolved_by": resolved_by,
+                }, ensure_ascii=False)
+            if action != "list":
+                return tool_error("action must be list or resolve")
             status = args.get("status", "")
             if status not in {"", "open", "resolved"}:
                 return tool_error("status must be empty, open, or resolved")

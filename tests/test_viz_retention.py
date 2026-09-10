@@ -1,7 +1,12 @@
 import importlib.util
 import re
+import tempfile
 import unittest
 from pathlib import Path
+
+import numpy as np
+
+from plugin.store import LanceDBStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +22,10 @@ class FakeStore:
     def get_conflicts(self, status="", limit=100, memory_id=""):
         self.calls.append((status, limit, memory_id))
         return [{"id": "conflict-1", "status": status or "open"}]
+
+    def resolve_conflict(self, conflict_id, resolution_note, resolved_by="user"):
+        self.calls.append((conflict_id, resolution_note, resolved_by))
+        return True
 
 
 class FakeUpdateStore:
@@ -44,6 +53,38 @@ class VizRetentionTests(unittest.TestCase):
 
         self.assertEqual([{"id": "conflict-1", "status": "open"}], result)
         self.assertEqual([("open", 25, "memory-1")], self.store.calls)
+
+    def test_conflict_resolution_api_is_auditable(self):
+        result = server.api_resolve_conflict("conflict-1", {
+            "resolution_note": "approved after review",
+            "resolved_by": "elo",
+        })
+
+        self.assertEqual({"success": True, "conflict_id": "conflict-1"}, result)
+        self.assertEqual([
+            ("conflict-1", "approved after review", "elo")
+        ], self.store.calls)
+        self.assertEqual(
+            "conflict-1",
+            server._parse_conflict_resolution_path("/api/conflicts/conflict-1/resolve"),
+        )
+
+    def test_stats_refreshes_mvcc_snapshot_and_db_size_is_on_demand(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reader = LanceDBStore(Path(tmp))
+            writer = LanceDBStore(Path(tmp))
+            original_embed = LanceDBStore._embed
+            LanceDBStore._embed = lambda _self, _text: np.zeros(768, dtype=np.float32)
+            try:
+                writer.add("Project:Alpha state=active [Tier=2]", category="project")
+                server._store_instance = reader
+                self.assertEqual(1, server._compute_stats_fast()["total_memories"])
+
+                reader._db_size = -1
+                reader._compute_db_size = lambda: 12345
+                self.assertEqual(12345, reader.db_size)
+            finally:
+                LanceDBStore._embed = original_embed
 
     def test_conflicts_page_contract_is_wired(self):
         html = (ROOT / "static" / "index.html").read_text()

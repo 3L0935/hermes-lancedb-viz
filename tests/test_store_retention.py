@@ -84,6 +84,51 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertEqual("graph", route_search_mode("Comment Project:Beta dépend de Project:Alpha ?"))
         self.assertEqual("hybrid", route_search_mode("configuration audio de mon PC"))
 
+    def test_router_markers_require_word_boundaries(self):
+        self.assertEqual("hybrid", route_search_mode("an inexact result"))
+        self.assertEqual("hybrid", route_search_mode("an unrelated topic"))
+        self.assertEqual("lexical", route_search_mode("an exact result"))
+        self.assertEqual("graph", route_search_mode("a related topic"))
+
+    def test_empty_lexical_branch_falls_back_to_hybrid(self):
+        hybrid = [{"id": "memory-1", "score": 0.4}]
+        self.store._search_lexical = lambda query, top_k, category: []
+        self.store._search_hybrid = lambda query, top_k, category: hybrid
+
+        results = self.store.search("exact missing phrase", top_k=3, mode="auto")
+
+        self.assertEqual(["memory-1"], [result["id"] for result in results])
+        self.assertEqual("hybrid", results[0]["search_mode"])
+        self.assertEqual("lexical_empty", results[0]["routing_fallback"])
+
+    def test_graph_depth_zero_uses_full_top_k_for_seeds(self):
+        requested = []
+        self.store._search_hybrid = lambda query, top_k, category: requested.append(top_k) or []
+
+        self.store.search("related projects", top_k=10, mode="graph", relation_depth=0)
+
+        self.assertEqual([10], requested)
+
+    def test_relation_expansion_order_is_stable(self):
+        direct = [{"id": "seed", "score": 1.0}]
+        self.store.get_typed_edges = lambda: [
+            {"from": "seed", "to": "z", "relation_type": "uses", "target_label": "Z", "created_at": 2.0},
+            {"from": "seed", "to": "a", "relation_type": "depends", "target_label": "A", "created_at": 1.0},
+        ]
+        self.store._get_by_id_raw = lambda memory_id: {
+            "id": memory_id, "content": memory_id, "category": "project"
+        }
+
+        first = self.store._expand_relation_context(direct, 3)
+        self.store.get_typed_edges = lambda: list(reversed([
+            {"from": "seed", "to": "z", "relation_type": "uses", "target_label": "Z", "created_at": 2.0},
+            {"from": "seed", "to": "a", "relation_type": "depends", "target_label": "A", "created_at": 1.0},
+        ]))
+        second = self.store._expand_relation_context(direct, 3)
+
+        self.assertEqual(["seed", "a", "z"], [row["id"] for row in first])
+        self.assertEqual([row["id"] for row in first], [row["id"] for row in second])
+
     def test_graph_search_expands_one_hop_with_direct_result_first(self):
         alpha_id = self.add("Project:Alpha state=active [Tier=2]")
         beta_id = self.add(
@@ -166,6 +211,124 @@ class StoreRetentionTests(unittest.TestCase):
 
         self.assertEqual([], self.store.get_conflicts(status="open"))
         self.assertEqual(1, len(self.store.get_conflicts(status="resolved")))
+
+    def test_category_update_closes_or_detects_conflicts(self):
+        self.add("Project:Alpha port=7777 [Tier=2]")
+        second_id = self.add("Project:Alpha port=7778 [Tier=2]")
+
+        self.assertTrue(self.store.update(second_id, category="insight"))
+        self.assertEqual([], self.store.get_conflicts(status="open"))
+
+        self.assertTrue(self.store.update(second_id, category="project"))
+        self.assertEqual(1, len(self.store.get_conflicts(status="open")))
+
+    def test_delete_closes_open_conflicts(self):
+        self.add("Project:Alpha port=7777 [Tier=2]")
+        second_id = self.add("Project:Alpha port=7778 [Tier=2]")
+
+        self.assertTrue(self.store.delete(second_id))
+
+        self.assertEqual([], self.store.get_conflicts(status="open"))
+        resolved = self.store.get_conflicts(status="resolved")
+        self.assertEqual("memory deleted", resolved[0]["resolution_note"])
+        self.assertEqual("auto", resolved[0]["resolution_type"])
+
+    def test_conflict_resolution_is_audited_and_not_reopened(self):
+        self.add("Project:Alpha port=7777 [Tier=2]")
+        second_id = self.add("Project:Alpha port=7778 [Tier=2]")
+        conflict_id = self.store.get_conflicts(status="open")[0]["id"]
+
+        self.assertTrue(self.store.resolve_conflict(
+            conflict_id,
+            resolution_note="7778 is the approved port",
+            resolved_by="elo",
+        ))
+        self.store.detect_conflicts_for(second_id)
+
+        self.assertEqual([], self.store.get_conflicts(status="open"))
+        conflict = self.store.get_conflicts(status="resolved")[0]
+        self.assertEqual("human", conflict["resolution_type"])
+        self.assertEqual("7778 is the approved port", conflict["resolution_note"])
+        self.assertEqual("elo", conflict["resolved_by"])
+
+    def test_delete_aborts_when_edge_cleanup_fails(self):
+        memory_id = self.add("Project:Alpha state=active [Tier=2]")
+        self.store._cleanup_edges_for_memory = lambda _memory_id: False
+
+        self.assertFalse(self.store.delete(memory_id))
+        self.assertIsNotNone(self.store._get_by_id_raw(memory_id))
+
+    def test_relation_replace_failure_preserves_previous_edge(self):
+        alpha_id = self.add("Project:Alpha state=active [Tier=2]")
+        gamma_id = self.add("Project:Gamma state=active [Tier=2]")
+        source_id = self.add(
+            "Project:Beta state=active [Tier=2]",
+            relations=[{"type": "depends", "target_id": alpha_id}],
+        )
+        actual = self.store._ensure_edges_table()
+
+        class FailingMergeTable:
+            def __getattr__(self, name):
+                return getattr(actual, name)
+
+            def merge_insert(self, _keys):
+                class Builder:
+                    def when_matched_update_all(inner_self):
+                        return inner_self
+
+                    def when_not_matched_insert_all(inner_self):
+                        return inner_self
+
+                    def when_not_matched_by_source_delete(inner_self, _condition):
+                        return inner_self
+
+                    def execute(inner_self, _rows):
+                        raise RuntimeError("interrupted merge")
+                return Builder()
+
+        self.store._ensure_edges_table = lambda: FailingMergeTable()
+
+        self.assertFalse(self.store.update(
+            source_id,
+            relations=[{"type": "depends", "target_id": gamma_id}],
+        ))
+        edges = [edge for edge in self.store.get_typed_edges() if edge["from"] == source_id]
+        self.assertEqual([alpha_id], [edge["to"] for edge in edges])
+
+    def test_relation_replace_verifies_postcondition(self):
+        alpha_id = self.add("Project:Alpha state=active [Tier=2]")
+        gamma_id = self.add("Project:Gamma state=active [Tier=2]")
+        source_id = self.add(
+            "Project:Beta state=active [Tier=2]",
+            relations=[{"type": "depends", "target_id": alpha_id}],
+        )
+        actual = self.store._ensure_edges_table()
+
+        class NoopMergeTable:
+            def __getattr__(self, name):
+                return getattr(actual, name)
+
+            def merge_insert(self, _keys):
+                class Builder:
+                    def when_matched_update_all(inner_self):
+                        return inner_self
+
+                    def when_not_matched_insert_all(inner_self):
+                        return inner_self
+
+                    def when_not_matched_by_source_delete(inner_self, _condition):
+                        return inner_self
+
+                    def execute(inner_self, _rows):
+                        return None
+                return Builder()
+
+        self.store._ensure_edges_table = lambda: NoopMergeTable()
+
+        self.assertFalse(self.store.update(
+            source_id,
+            relations=[{"type": "depends", "target_id": gamma_id}],
+        ))
 
     def test_reintroduced_claim_conflict_reopens_ledger_record(self):
         self.add("Project:Alpha port=7777 [Tier=2]")

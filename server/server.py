@@ -112,6 +112,7 @@ def _compute_stats_fast() -> dict:
     import lancedb
 
     store = _get_store()
+    store._fresh()
     now = time.time()
 
     # Read only the columns we need (no vector column)
@@ -964,6 +965,30 @@ def api_get_conflicts(params: dict) -> list:
         return {"error": str(e)}
 
 
+def api_resolve_conflict(conflict_id: str, data: dict) -> dict:
+    """POST /api/conflicts/:id/resolve — resolve with an audit trail."""
+    resolution_note = str(data.get("resolution_note") or "").strip()
+    resolved_by = str(data.get("resolved_by") or "user").strip()
+    if not conflict_id:
+        return {"error": "Missing conflict_id"}
+    if not resolution_note:
+        return {"error": "Missing resolution_note"}
+    if not resolved_by:
+        return {"error": "Missing resolved_by"}
+    try:
+        ok = _get_store().resolve_conflict(
+            conflict_id,
+            resolution_note=resolution_note,
+            resolved_by=resolved_by,
+        )
+        if ok:
+            _invalidate_cache()
+            return {"success": True, "conflict_id": conflict_id}
+        return {"error": "Conflict not found or already resolved"}
+    except Exception as error:
+        return {"error": str(error)}
+
+
 def api_get_dashboard() -> dict:
     """GET /api/dashboard — enriched stats for the dashboard view.
     Uses cached computation to avoid full DB scan on every request.
@@ -1136,6 +1161,9 @@ def api_merge_tags(data: dict) -> dict:
 
 # Pattern for /api/memories/:id (captures the memory_id after /api/memories/)
 _MEM_ID_RE = re.compile(r"^/api/memories/([a-zA-Z0-9_-]+?)(?:/access)?$")
+_CONFLICT_RESOLVE_RE = re.compile(
+    r"^/api/conflicts/([a-zA-Z0-9_-]+)/resolve$"
+)
 
 
 def _parse_memories_id_path(path: str):
@@ -1154,6 +1182,12 @@ def _parse_memories_id_path(path: str):
     if m:
         return m.group(1), ""
     return None
+
+
+def _parse_conflict_resolution_path(path: str):
+    """Return the conflict ID for POST /api/conflicts/:id/resolve."""
+    match = _CONFLICT_RESOLVE_RE.match(path)
+    return match.group(1) if match else None
 
 
 # ---------------------------------------------------------------------------
@@ -1263,6 +1297,10 @@ class Handler(BaseHTTPRequestHandler):
             data = self._read_json()
             result = import_memories(data)
             self._send_json(result)
+
+        elif conflict_id := _parse_conflict_resolution_path(path):
+            data = self._read_json()
+            self._send_json(api_resolve_conflict(conflict_id, data))
 
         # --- New memviz POST endpoints ---
         elif path == "/api/memories/bulk-delete":

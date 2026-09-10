@@ -18,6 +18,10 @@ class FakeStore:
             return []
         return rows[:limit]
 
+    def resolve_conflict(self, conflict_id, resolution_note, resolved_by="user"):
+        self.resolved = (conflict_id, resolution_note, resolved_by)
+        return conflict_id == "conflict-1"
+
 
 class ProviderRetentionTests(unittest.TestCase):
     def setUp(self):
@@ -34,6 +38,28 @@ class ProviderRetentionTests(unittest.TestCase):
 
         self.assertEqual(1, payload["count"])
         self.assertEqual("conflict-1", payload["conflicts"][0]["id"])
+
+    def test_conflicts_tool_resolves_with_audit_fields(self):
+        payload = json.loads(self.provider.handle_tool_call(
+            "lancedb_conflicts",
+            {
+                "action": "resolve",
+                "conflict_id": "conflict-1",
+                "resolution_note": "reviewed and approved",
+                "resolved_by": "elo",
+            },
+        ))
+
+        self.assertTrue(payload["success"])
+        self.assertEqual(
+            ("conflict-1", "reviewed and approved", "elo"),
+            self.provider._store.resolved,
+        )
+        schema = next(
+            item for item in self.provider.get_tool_schemas()
+            if item["name"] == "lancedb_conflicts"
+        )
+        self.assertIn("action", schema["parameters"]["properties"])
 
     def test_add_returns_new_conflicts_for_immediate_visibility(self):
         payload = json.loads(self.provider.handle_tool_call(
