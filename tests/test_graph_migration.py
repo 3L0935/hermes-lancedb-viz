@@ -18,7 +18,9 @@ SPEC.loader.exec_module(migration)
 class GraphMigrationTests(unittest.TestCase):
     @staticmethod
     def fake_embed(_self, _text):
-        return np.zeros(768, dtype=np.float32)
+        vector = np.zeros(768, dtype=np.float32)
+        vector[0] = 1.0
+        return vector
 
     def test_resolution_plan_handles_exact_short_ambiguous_and_orphaned_edges(self):
         memories = [
@@ -47,7 +49,7 @@ class GraphMigrationTests(unittest.TestCase):
             path = Path(tmp)
             with patch.object(LanceDBStore, "_embed", self.fake_embed):
                 store = LanceDBStore(path)
-                source_id = store.add("Project:Source state=active [Tier=2]")
+                source_id = store.add("Project:Source state=active [Tier=2]", legacy=True)
                 store._ensure_edges_table().add([{
                     "source_id": source_id,
                     "relation_type": "depends",
@@ -71,8 +73,8 @@ class GraphMigrationTests(unittest.TestCase):
             path = Path(tmp)
             with patch.object(LanceDBStore, "_embed", self.fake_embed):
                 store = LanceDBStore(path)
-                target_id = store.add("Project:Target state=active [Tier=2]")
-                source_id = store.add("Project:Source state=active [Tier=2]")
+                target_id = store.add("Project:Target state=active [Tier=2]", legacy=True)
+                source_id = store.add("Project:Source state=active [Tier=2]", legacy=True)
                 store._ensure_edges_table().add([{
                     "source_id": source_id,
                     "relation_type": "depends",
@@ -99,8 +101,16 @@ class GraphMigrationTests(unittest.TestCase):
             path = Path(tmp)
             with patch.object(LanceDBStore, "_embed", self.fake_embed):
                 store = LanceDBStore(path)
-                store.add("Project:Alpha port=7777 [Tier=2]", category="project")
-                store.add("Project:Alpha port=7778 [Tier=2]", category="project")
+                store.add(
+                    "Project:Alpha port=7777 [Tier=2]",
+                    category="project",
+                    legacy=True,
+                )
+                store.add(
+                    "Project:Alpha port=7778 [Tier=2]",
+                    category="project",
+                    legacy=True,
+                )
                 conflict = store.get_conflicts(status="open")[0]
                 store._ensure_conflicts_table().update(
                     f"id = '{conflict['id']}'",

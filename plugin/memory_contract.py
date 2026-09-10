@@ -40,6 +40,8 @@ MAX_FACTS = 12
 MAX_FACT_CHARS = 1000
 MAX_TOTAL_FACT_CHARS = 2000
 MAX_RELATIONS = 20
+MAX_TAGS = 20
+MAX_TAG_CHARS = 80
 
 VALID_CATEGORIES = frozenset({
     "user_pref", "project", "tech", "correction", "fact",
@@ -140,7 +142,14 @@ def _normalize_label(value: Any, *, field: str, max_chars: int) -> str:
     return normalized
 
 
-def _normalize_fact(value: Any, index: int, *, domain: str, subject: str) -> str:
+def _normalize_fact(
+    value: Any,
+    index: int,
+    *,
+    domain: str,
+    subject: str,
+    enforce_density: bool = True,
+) -> str:
     field = f"facts[{index}]"
     if not isinstance(value, str):
         _raise("invalid_type", field, "each fact must be a string", type(value).__name__, "string")
@@ -185,7 +194,7 @@ def _normalize_fact(value: Any, index: int, *, domain: str, subject: str) -> str
         )
 
     normalized = _CLAIM_KEY_RE.sub(lambda match: f"{match.group(1).lower()}=", normalized)
-    if len(normalized) > MAX_FACT_CHARS:
+    if enforce_density and len(normalized) > MAX_FACT_CHARS:
         _raise(
             "fact_too_long",
             field,
@@ -291,6 +300,14 @@ def _normalize_relations(value: Any) -> tuple[MemoryRelation, ...]:
 
 
 @dataclass(frozen=True)
+class MemoryContentParts:
+    domain: str
+    subject: str
+    body: str
+    tier: int
+
+
+@dataclass(frozen=True)
 class MemoryWrite:
     domain: str
     subject: str
@@ -367,12 +384,18 @@ class MemoryPatch:
     tier: int | None = None
     category: str | None = None
     relations: tuple[MemoryRelation, ...] | None = None
+    tags: tuple[str, ...] | None = None
+    quality: float | None = None
+    type: str | None = None
 
     @classmethod
     def from_mapping(cls, value: Mapping[str, Any]) -> "MemoryPatch":
         if not isinstance(value, Mapping):
             _raise("invalid_type", "request", "memory patch must be an object", type(value).__name__, "object")
-        allowed = {"memory_id", "domain", "subject", "facts", "tier", "category", "relations"}
+        allowed = {
+            "memory_id", "domain", "subject", "facts", "tier", "category",
+            "relations", "tags", "quality", "type",
+        }
         unknown = set(value) - allowed
         if unknown:
             _raise("unknown_field", "request", "memory patch contains unknown fields", sorted(unknown), sorted(allowed))
@@ -389,6 +412,33 @@ class MemoryPatch:
         tier = _normalize_tier(value["tier"]) if "tier" in value else None
         category = _normalize_category(value["category"]) if "category" in value else None
         relations = _normalize_relations(value["relations"]) if "relations" in value else None
+
+        tags = None
+        if "tags" in value:
+            raw_tags = value["tags"]
+            if isinstance(raw_tags, (str, bytes)) or not isinstance(raw_tags, Sequence):
+                _raise("invalid_type", "tags", "tags must be an array of strings", type(raw_tags).__name__, "array")
+            if len(raw_tags) > MAX_TAGS:
+                _raise("too_many_tags", "tags", "too many tags", len(raw_tags), f"0..{MAX_TAGS}")
+            normalized_tags = []
+            for index, tag in enumerate(raw_tags):
+                normalized_tag = _normalize_label(tag, field=f"tags[{index}]", max_chars=MAX_TAG_CHARS)
+                if normalized_tag not in normalized_tags:
+                    normalized_tags.append(normalized_tag)
+            tags = tuple(normalized_tags)
+
+        quality = None
+        if "quality" in value:
+            raw_quality = value["quality"]
+            if isinstance(raw_quality, bool) or not isinstance(raw_quality, (int, float)):
+                _raise("invalid_type", "quality", "quality must be a number", type(raw_quality).__name__, "number from 0 to 1")
+            quality = float(raw_quality)
+            if not 0.0 <= quality <= 1.0:
+                _raise("invalid_quality", "quality", "quality must be between 0 and 1", raw_quality, "0..1")
+
+        memory_type = None
+        if "type" in value:
+            memory_type = _normalize_label(value["type"], field="type", max_chars=MAX_TAG_CHARS)
 
         facts = None
         if "facts" in value:
@@ -417,6 +467,9 @@ class MemoryPatch:
             tier=tier,
             category=category,
             relations=relations,
+            tags=tags,
+            quality=quality,
+            type=memory_type,
         )
 
 
@@ -431,13 +484,8 @@ def render_content(memory: MemoryWrite) -> str:
     return f"{memory.domain}:{memory.subject} {body} [Tier={memory.tier}]"
 
 
-def parse_content(
-    content: Any,
-    *,
-    category: str = "fact",
-    relations: Sequence[Mapping[str, Any]] | None = None,
-    write_mode: str = "create",
-) -> MemoryWrite:
+def parse_content_parts(content: Any) -> MemoryContentParts:
+    """Parse and normalize wrappers without applying density caps to the body."""
     if not isinstance(content, str):
         _raise("invalid_type", "content", "content must be a string", type(content).__name__, "string")
     normalized = unicodedata.normalize("NFKC", content).strip()
@@ -460,11 +508,37 @@ def parse_content(
     if not body:
         _raise("required_field", "facts", "legacy content has no fact body", content, "one or more facts")
 
+    domain = _normalize_label(prefix.group("domain"), field="domain", max_chars=MAX_DOMAIN_CHARS)
+    subject = _normalize_label(prefix.group("subject"), field="subject", max_chars=MAX_SUBJECT_CHARS)
+    body = _normalize_fact(
+        body,
+        0,
+        domain=domain,
+        subject=subject,
+        enforce_density=False,
+    )
+    return MemoryContentParts(
+        domain=domain,
+        subject=subject,
+        body=body,
+        tier=int(markers[0].strip()),
+    )
+
+
+def parse_content(
+    content: Any,
+    *,
+    category: str = "fact",
+    relations: Sequence[Mapping[str, Any]] | None = None,
+    write_mode: str = "create",
+) -> MemoryWrite:
+    parts = parse_content_parts(content)
+
     return MemoryWrite.from_mapping({
-        "domain": prefix.group("domain"),
-        "subject": prefix.group("subject"),
-        "facts": [body],
-        "tier": int(markers[0].strip()),
+        "domain": parts.domain,
+        "subject": parts.subject,
+        "facts": [parts.body],
+        "tier": parts.tier,
         "category": category,
         "relations": list(relations or []),
         "write_mode": write_mode,

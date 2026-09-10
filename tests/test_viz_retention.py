@@ -77,9 +77,15 @@ class VizRetentionTests(unittest.TestCase):
             reader = LanceDBStore(Path(tmp))
             writer = LanceDBStore(Path(tmp))
             original_embed = LanceDBStore._embed
-            LanceDBStore._embed = lambda _self, _text: np.zeros(768, dtype=np.float32)
+            LanceDBStore._embed = lambda _self, _text: np.pad(
+                np.ones(1, dtype=np.float32), (0, 767)
+            )
             try:
-                writer.add("Project:Alpha state=active [Tier=2]", category="project")
+                writer.add(
+                    "Project:Alpha state=active [Tier=2]",
+                    category="project",
+                    legacy=True,
+                )
                 server._store_instance = reader
                 self.assertEqual(1, server._compute_stats_fast()["total_memories"])
 
@@ -91,20 +97,23 @@ class VizRetentionTests(unittest.TestCase):
 
     def test_export_import_round_trip_preserves_relations_and_conflict_audit(self):
         original_embed = LanceDBStore._embed
-        LanceDBStore._embed = lambda _self, _text: np.zeros(768, dtype=np.float32)
+        LanceDBStore._embed = lambda _self, _text: np.pad(
+            np.ones(1, dtype=np.float32), (0, 767)
+        )
         try:
             with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as dest_tmp:
                 source = LanceDBStore(Path(source_tmp))
-                target_id = source.add("Project:Target state=active [Tier=2]")
+                target_id = source.add("Project:Target state=active [Tier=2]", legacy=True)
                 source_id = source.add(
                     "Project:Source state=active [Tier=2]",
                     relations=[
                         {"type": "depends", "target_id": target_id},
                         {"type": "uses", "target": "Project:Missing"},
                     ],
+                    legacy=True,
                 )
-                source.add("Project:Claim port=7777 [Tier=2]")
-                claim_id = source.add("Project:Claim port=7778 [Tier=2]")
+                source.add("Project:Claim port=7777 [Tier=2]", legacy=True)
+                claim_id = source.add("Project:Claim port=7778 [Tier=2]", legacy=True)
                 conflict_id = source.get_conflicts(status="open")[0]["id"]
                 source.resolve_conflict(conflict_id, "7778 approved", "elo")
                 server._store_instance = source
@@ -134,7 +143,9 @@ class VizRetentionTests(unittest.TestCase):
 
     def test_import_rebuilds_conflicts_when_legacy_export_has_no_registry(self):
         original_embed = LanceDBStore._embed
-        LanceDBStore._embed = lambda _self, _text: np.zeros(768, dtype=np.float32)
+        LanceDBStore._embed = lambda _self, _text: np.pad(
+            np.ones(1, dtype=np.float32), (0, 767)
+        )
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 server._store_instance = LanceDBStore(Path(tmp))
@@ -161,12 +172,14 @@ class VizRetentionTests(unittest.TestCase):
 
     def test_export_uses_typed_edge_table_as_relation_source_of_truth(self):
         original_embed = LanceDBStore._embed
-        LanceDBStore._embed = lambda _self, _text: np.zeros(768, dtype=np.float32)
+        LanceDBStore._embed = lambda _self, _text: np.pad(
+            np.ones(1, dtype=np.float32), (0, 767)
+        )
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 source = LanceDBStore(Path(tmp))
-                target_id = source.add("Project:Target state=active [Tier=2]")
-                source_id = source.add("Project:Source state=active [Tier=2]")
+                target_id = source.add("Project:Target state=active [Tier=2]", legacy=True)
+                source_id = source.add("Project:Source state=active [Tier=2]", legacy=True)
                 source._ensure_edges_table().add([{
                     "source_id": source_id,
                     "relation_type": "depends",
@@ -192,7 +205,9 @@ class VizRetentionTests(unittest.TestCase):
 
     def test_import_rerun_repairs_relations_after_partial_run(self):
         original_embed = LanceDBStore._embed
-        LanceDBStore._embed = lambda _self, _text: np.zeros(768, dtype=np.float32)
+        LanceDBStore._embed = lambda _self, _text: np.pad(
+            np.ones(1, dtype=np.float32), (0, 767)
+        )
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 store = LanceDBStore(Path(tmp))

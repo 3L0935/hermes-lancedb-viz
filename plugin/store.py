@@ -16,7 +16,38 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from .memory_contract import (
+    ContractIssue,
+    MemoryContractError,
+    MemoryPatch,
+    MemoryWrite,
+    contract_warnings,
+    memory_fingerprint,
+    parse_content,
+    parse_content_parts,
+    render_content,
+)
+
 logger = logging.getLogger(__name__)
+
+
+class MemoryEmbeddingError(RuntimeError):
+    """Retryable failure raised before a strict write reaches LanceDB."""
+
+    retryable = True
+
+    def __init__(self, detail: str = "embedding service returned no usable vector"):
+        self.issue = ContractIssue(
+            code="embedding_failed",
+            field="content",
+            message="memory was not written because embedding failed",
+            received=detail,
+            expected="a non-zero 768-dimensional embedding",
+        )
+        super().__init__(self.issue.message)
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.issue.to_dict()
 
 # ---------------------------------------------------------------------------
 # Config
@@ -1043,6 +1074,16 @@ class LanceDBStore:
             logger.warning("Embedding failed: %s — returning zero vector", e)
             return np.zeros(768, dtype=np.float32)
 
+    def _require_embedding(self, text: str) -> np.ndarray:
+        """Return a usable embedding or fail before any memory row is written."""
+        vector = np.asarray(self._embed(text), dtype=np.float32)
+        if vector.shape != (768,) or not np.isfinite(vector).all():
+            raise MemoryEmbeddingError(f"invalid vector shape or values: {vector.shape}")
+        norm = float(np.linalg.norm(vector))
+        if norm < 0.001:
+            raise MemoryEmbeddingError("zero vector")
+        return vector / norm
+
     # -----------------------------------------------------------------------
     # CRUD
     # -----------------------------------------------------------------------
@@ -1069,29 +1110,125 @@ class LanceDBStore:
                     relations.append({"type": rtype, "target": target})
         return clean, json.dumps(relations)
 
-    def add(self, content: str, category: str = "fact", source: str = "",
-            session_id: str = "", user_id: str = "",
-            tags: list[str] | None = None,
-            quality: float | None = None,
-            type_: str | None = None,
-            relations: list[dict] | None = None,
-            warnings: list[str] | None = None) -> str:
-        """Add a new memory. Extracts entities, embeds, links."""
+    @staticmethod
+    def _contract_error(
+        code: str,
+        field: str,
+        message: str,
+        received: Any,
+        expected: Any,
+    ) -> MemoryContractError:
+        return MemoryContractError(ContractIssue(
+            code=code,
+            field=field,
+            message=message,
+            received=received,
+            expected=expected,
+        ))
+
+    @staticmethod
+    def _relation_lists_match(
+        requested: tuple | list,
+        stored: list[dict],
+    ) -> bool:
+        """Compare requested relations with their persisted, resolved form."""
+        if len(requested) != len(stored):
+            return False
+        remaining = list(stored)
+        for relation in requested:
+            candidate = relation.to_dict() if hasattr(relation, "to_dict") else relation
+            relation_type = str(candidate.get("type") or "")
+            target_id = str(candidate.get("target_id") or "").strip()
+            target = str(candidate.get("target") or "").strip().casefold()
+            match_index = next((
+                index
+                for index, persisted in enumerate(remaining)
+                if str(persisted.get("type") or "") == relation_type
+                and (
+                    (target_id and str(persisted.get("target_id") or "").strip() == target_id)
+                    or (target and str(persisted.get("target") or "").strip().casefold() == target)
+                )
+            ), None)
+            if match_index is None:
+                return False
+            remaining.pop(match_index)
+        return not remaining
+
+    def _preflight_memory_write(
+        self,
+        memory: MemoryWrite,
+        *,
+        exclude_id: str = "",
+    ) -> tuple[dict | None, list[dict], list[dict]]:
+        """Find exact, same-subject, and conflicting rows without embedding."""
+        canonical_content = render_content(memory)
+        subject = canonical_subject(canonical_content)
+        claims = extract_claims(canonical_content)
+        exact = None
+        same_subject = []
+        conflicts = []
+
+        for row in self._get_all_raw():
+            if str(row.get("id") or "") == exclude_id:
+                continue
+            if canonical_subject(str(row.get("content") or "")) != subject:
+                continue
+            same_subject.append(row)
+
+            stored_relations = row.get("relations")
+            if not isinstance(stored_relations, list):
+                stored_relations = []
+            try:
+                stored_memory = parse_content(
+                    row.get("content"),
+                    category=str(row.get("category") or "fact"),
+                    relations=[relation.to_dict() for relation in memory.relations],
+                )
+            except MemoryContractError:
+                stored_memory = None
+            if (
+                stored_memory is not None
+                and self._relation_lists_match(memory.relations, stored_relations)
+                and memory_fingerprint(stored_memory) == memory_fingerprint(memory)
+            ):
+                exact = row
+                break
+
+            other_claims = extract_claims(str(row.get("content") or ""))
+            for key in sorted(set(claims) & set(other_claims)):
+                if claims[key] != other_claims[key]:
+                    conflicts.append({
+                        "memory_id": str(row.get("id") or ""),
+                        "claim_key": key,
+                        "existing": other_claims[key],
+                        "received": claims[key],
+                    })
+        return exact, same_subject, conflicts
+
+    def _insert_memory(
+        self,
+        *,
+        content: str,
+        category: str,
+        source: str = "",
+        session_id: str = "",
+        user_id: str = "",
+        tags: list[str] | None = None,
+        quality: float | None = None,
+        type_: str | None = None,
+        relations: list[dict] | None = None,
+        warnings: list[str] | None = None,
+    ) -> str:
+        """Persist already validated content. Callers must run preflight first."""
         self._fresh()
         from uuid import uuid4
         mem_id = str(uuid4())[:12]
 
-        # Fallback invalid category
-        if category not in VALID_CATEGORIES:
-            category = "fact"
-
-        # Separate legacy relation blocks from content. Explicit structured
-        # relations take precedence and are resolved after the memory exists.
-        clean_content, relations_json = self._strip_relations_from_content(content)
-        relations_list = relations if relations is not None else json.loads(relations_json)
+        clean_content = content.strip()
+        relations_list = relations or []
         relations_json = json.dumps(relations_list)
 
-        vector = self._embed(clean_content)
+        vector = self._require_embedding(clean_content)
         entities = extract_entities(clean_content)
         now = time.time()
 
@@ -1147,8 +1284,152 @@ class LanceDBStore:
 
         return mem_id
 
-    def update(self, memory_id: str, **kwargs) -> bool:
-        """Update fields of a memory. Accepts: content, category, tags, quality, type, entities."""
+    def add_memory(
+        self,
+        memory: MemoryWrite,
+        *,
+        source: str = "",
+        session_id: str = "",
+        user_id: str = "",
+        tags: list[str] | None = None,
+        quality: float | None = None,
+        type_: str | None = None,
+    ) -> dict[str, Any]:
+        """Strict structured write with idempotency and subject preflight."""
+        if not isinstance(memory, MemoryWrite):
+            raise self._contract_error(
+                "invalid_type", "request", "add_memory requires MemoryWrite",
+                type(memory).__name__, "MemoryWrite",
+            )
+        memory = MemoryWrite.from_mapping({
+            "domain": memory.domain,
+            "subject": memory.subject,
+            "facts": list(memory.facts),
+            "tier": memory.tier,
+            "category": memory.category,
+            "relations": [relation.to_dict() for relation in memory.relations],
+            "write_mode": memory.write_mode,
+        })
+        self._fresh()
+        canonical_content = render_content(memory)
+        warning_dicts = [warning.to_dict() for warning in contract_warnings(memory)]
+        exact, same_subject, conflicts = self._preflight_memory_write(memory)
+
+        if exact is not None:
+            return {
+                "success": True,
+                "status": "idempotent",
+                "memory_id": str(exact["id"]),
+                "canonical_content": canonical_content,
+                "warnings": warning_dicts,
+            }
+
+        if same_subject and memory.write_mode == "create":
+            existing = same_subject[0]
+            if conflicts:
+                raise self._contract_error(
+                    "conflicting_claims",
+                    "facts",
+                    "same-subject write conflicts with existing explicit claims",
+                    conflicts,
+                    "resolve the conflict or explicitly update the existing memory",
+                )
+            return {
+                "success": False,
+                "status": "update_suggested",
+                "memory_id": str(existing["id"]),
+                "existing_content": str(existing.get("content") or ""),
+                "canonical_content": canonical_content,
+                "warnings": warning_dicts,
+            }
+
+        if same_subject and memory.write_mode == "upsert_subject":
+            if len(same_subject) != 1:
+                raise self._contract_error(
+                    "ambiguous_subject",
+                    "subject",
+                    "subject-level upsert requires exactly one existing memory",
+                    [str(row.get("id") or "") for row in same_subject],
+                    "one existing memory ID; use update_memory when multiple rows exist",
+                )
+            existing = same_subject[0]
+            result = self.update_memory(MemoryPatch.from_mapping({
+                "memory_id": str(existing["id"]),
+                "domain": memory.domain,
+                "subject": memory.subject,
+                "facts": list(memory.facts),
+                "tier": memory.tier,
+                "category": memory.category,
+                "relations": [relation.to_dict() for relation in memory.relations],
+            }), _allow_claim_replacement=True)
+            result["warnings"] = warning_dicts
+            return result
+
+        memory_id = self._insert_memory(
+            content=canonical_content,
+            category=memory.category,
+            source=source,
+            session_id=session_id,
+            user_id=user_id,
+            tags=tags,
+            quality=quality,
+            type_=type_,
+            relations=[relation.to_dict() for relation in memory.relations],
+        )
+        return {
+            "success": True,
+            "status": "created",
+            "memory_id": memory_id,
+            "canonical_content": canonical_content,
+            "warnings": warning_dicts,
+        }
+
+    def add(
+        self,
+        content: str,
+        category: str = "fact",
+        source: str = "",
+        session_id: str = "",
+        user_id: str = "",
+        tags: list[str] | None = None,
+        quality: float | None = None,
+        type_: str | None = None,
+        relations: list[dict] | None = None,
+        warnings: list[str] | None = None,
+        *,
+        legacy: bool = False,
+    ) -> str:
+        """Legacy import/migration adapter; normal callers must use add_memory."""
+        if not legacy:
+            raise self._contract_error(
+                "legacy_api_disabled",
+                "content",
+                "raw add is fenced; use add_memory(MemoryWrite)",
+                content,
+                "structured MemoryWrite",
+            )
+        clean_content, relation_json = self._strip_relations_from_content(content)
+        relations_list = relations if relations is not None else json.loads(relation_json)
+        parsed = parse_content(
+            clean_content,
+            category=category,
+            relations=relations_list,
+        )
+        return self._insert_memory(
+            content=render_content(parsed),
+            category=parsed.category,
+            source=source,
+            session_id=session_id,
+            user_id=user_id,
+            tags=tags,
+            quality=quality,
+            type_=type_,
+            relations=[relation.to_dict() for relation in parsed.relations],
+            warnings=warnings,
+        )
+
+    def _apply_update(self, memory_id: str, **kwargs) -> bool:
+        """Apply validated fields to one row."""
         self._fresh()
         try:
             existing = self._get_by_id_raw(memory_id)
@@ -1166,7 +1447,7 @@ class LanceDBStore:
                 # Re-extract entities
                 updates["entities"] = json.dumps(extract_entities(clean_content))
                 # Re-embed
-                vector = self._embed(clean_content)
+                vector = self._require_embedding(clean_content)
                 updates["vector"] = vector.tolist()
 
             if "relations" in kwargs and isinstance(kwargs["relations"], list):
@@ -1213,9 +1494,150 @@ class LanceDBStore:
                 self._rebuild_all_links()
 
             return True
+        except MemoryEmbeddingError:
+            raise
         except Exception as e:
             logger.error("Update failed: %s", e)
             return False
+
+    def update_memory(
+        self,
+        patch: MemoryPatch,
+        *,
+        _allow_claim_replacement: bool = False,
+    ) -> dict[str, Any]:
+        """Apply a typed patch while preserving the current memory by default."""
+        if not isinstance(patch, MemoryPatch):
+            raise self._contract_error(
+                "invalid_type", "request", "update_memory requires MemoryPatch",
+                type(patch).__name__, "MemoryPatch",
+            )
+        raw_patch: dict[str, Any] = {"memory_id": patch.memory_id}
+        for field in (
+            "domain", "subject", "facts", "tier", "category", "relations",
+            "tags", "quality", "type",
+        ):
+            value = getattr(patch, field)
+            if value is None:
+                continue
+            if field in {"facts", "tags"}:
+                raw_patch[field] = list(value)
+            elif field == "relations":
+                raw_patch[field] = [relation.to_dict() for relation in value]
+            else:
+                raw_patch[field] = value
+        patch = MemoryPatch.from_mapping(raw_patch)
+        self._fresh()
+        existing = self._get_by_id_raw(patch.memory_id)
+        if not existing:
+            raise self._contract_error(
+                "memory_not_found", "memory_id", "memory does not exist",
+                patch.memory_id, "existing memory ID",
+            )
+
+        replaced_content = str(existing.get("content") or "")
+        content_fields_changed = any(
+            value is not None
+            for value in (patch.domain, patch.subject, patch.facts, patch.tier)
+        )
+        kwargs: dict[str, Any] = {}
+        warning_dicts: list[dict[str, Any]] = []
+
+        if content_fields_changed or patch.category is not None:
+            parts = parse_content_parts(replaced_content)
+            candidate = MemoryWrite.from_mapping({
+                "domain": patch.domain or parts.domain,
+                "subject": patch.subject or parts.subject,
+                "facts": list(patch.facts) if patch.facts is not None else [parts.body],
+                "tier": patch.tier or parts.tier,
+                "category": patch.category or str(existing.get("category") or "fact"),
+                "relations": [relation.to_dict() for relation in (patch.relations or ())],
+            })
+            canonical_content = render_content(candidate)
+            exact, same_subject, conflicts = self._preflight_memory_write(
+                candidate,
+                exclude_id=patch.memory_id,
+            )
+            if exact is not None:
+                raise self._contract_error(
+                    "duplicate_memory", "facts", "update would duplicate another memory",
+                    str(exact.get("id") or ""), "unique canonical memory",
+                )
+            if conflicts and not _allow_claim_replacement:
+                raise self._contract_error(
+                    "conflicting_claims",
+                    "facts",
+                    "update conflicts with another same-subject memory",
+                    conflicts,
+                    "resolve the conflict before updating",
+                )
+            if len(same_subject) > 1 and _allow_claim_replacement:
+                raise self._contract_error(
+                    "ambiguous_subject", "subject", "upsert target became ambiguous",
+                    [str(row.get("id") or "") for row in same_subject],
+                    "one same-subject memory",
+                )
+            if content_fields_changed:
+                kwargs["content"] = canonical_content
+            if patch.category is not None:
+                kwargs["category"] = candidate.category
+            warning_dicts = [warning.to_dict() for warning in contract_warnings(candidate)]
+        else:
+            canonical_content = replaced_content
+
+        if patch.relations is not None:
+            kwargs["relations"] = [relation.to_dict() for relation in patch.relations]
+        if patch.tags is not None:
+            kwargs["tags"] = list(patch.tags)
+        if patch.quality is not None:
+            kwargs["quality"] = patch.quality
+        if patch.type is not None:
+            kwargs["type"] = patch.type
+
+        if not self._apply_update(patch.memory_id, **kwargs):
+            raise self._contract_error(
+                "update_failed", "memory_id", "memory update did not commit",
+                patch.memory_id, "committed update",
+            )
+        return {
+            "success": True,
+            "status": "updated",
+            "memory_id": patch.memory_id,
+            "canonical_content": canonical_content,
+            "replaced_content": replaced_content,
+            "warnings": warning_dicts,
+        }
+
+    def update(self, memory_id: str, *, legacy: bool = False, **kwargs) -> bool:
+        """Legacy import/migration adapter; normal callers use update_memory."""
+        if not legacy:
+            raise self._contract_error(
+                "legacy_api_disabled",
+                "content",
+                "raw update is fenced; use update_memory(MemoryPatch)",
+                sorted(kwargs),
+                "structured MemoryPatch",
+            )
+        existing = self._get_by_id_raw(memory_id)
+        if not existing:
+            return False
+        if "content" in kwargs and kwargs["content"]:
+            clean_content, relation_json = self._strip_relations_from_content(kwargs["content"])
+            relations = kwargs.get("relations", json.loads(relation_json))
+            parsed = parse_content(
+                clean_content,
+                category=kwargs.get("category", str(existing.get("category") or "fact")),
+                relations=relations,
+            )
+            kwargs["content"] = render_content(parsed)
+            kwargs["category"] = parsed.category
+            kwargs["relations"] = [relation.to_dict() for relation in parsed.relations]
+        elif "category" in kwargs and kwargs["category"] not in VALID_CATEGORIES:
+            raise self._contract_error(
+                "invalid_category", "category", "unknown category is rejected",
+                kwargs["category"], sorted(VALID_CATEGORIES),
+            )
+        return self._apply_update(memory_id, **kwargs)
 
     def delete(self, memory_id: str) -> bool:
         """Delete a memory by ID."""
@@ -1249,6 +1671,7 @@ class LanceDBStore:
         existing_ids = set(existing_by_id)
         imported = 0
         skipped = 0
+        errors = []
         now = time.time()
         rows_to_add = []
         relations_by_id = {}
@@ -1272,13 +1695,32 @@ class LanceDBStore:
                 mem_id = str(uuid4())[:12]
 
             category = str(item.get("category") or "fact")
+            contract_relations = []
+            for relation in relations:
+                if not isinstance(relation, dict):
+                    continue
+                normalized_relation = {"type": relation.get("type")}
+                if relation.get("target_id"):
+                    normalized_relation["target_id"] = relation["target_id"]
+                elif relation.get("target"):
+                    normalized_relation["target"] = relation["target"]
+                contract_relations.append(normalized_relation)
+            try:
+                parsed = parse_content(
+                    content,
+                    category=category,
+                    relations=contract_relations,
+                )
+                content = render_content(parsed)
+                category = parsed.category
+                vector = self._require_embedding(content)
+            except MemoryContractError as error:
+                skipped += 1
+                errors.append({"memory_id": mem_id, "error": error.to_dict()})
+                continue
             entities = item.get("entities") if isinstance(item.get("entities"), list) else []
             tags = item.get("tags") if isinstance(item.get("tags"), list) else []
             created_at = float(item.get("created_at") or now)
-            try:
-                vector = self._embed(content)
-            except Exception:
-                vector = np.zeros(768, dtype=np.float32)
 
             rows_to_add.append({
                 "id": mem_id,
@@ -1341,6 +1783,7 @@ class LanceDBStore:
             "skipped": skipped,
             "relations_rebuilt": edge_count,
             "conflicts_restored": restored,
+            "errors": errors,
         }
 
     def bulk_delete(self, memory_ids: list[str]) -> dict:

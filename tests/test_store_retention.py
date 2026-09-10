@@ -5,7 +5,13 @@ from unittest.mock import patch
 
 import numpy as np
 
-from plugin.store import LanceDBStore, extract_claims, route_search_mode
+from plugin.memory_contract import MemoryContractError, MemoryPatch, MemoryWrite
+from plugin.store import (
+    LanceDBStore,
+    MemoryEmbeddingError,
+    extract_claims,
+    route_search_mode,
+)
 
 
 def fake_embed(_self, text: str) -> np.ndarray:
@@ -29,7 +35,152 @@ class StoreRetentionTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def add(self, content: str, category: str = "project", **kwargs) -> str:
-        return self.store.add(content, category=category, **kwargs)
+        return self.store.add(content, category=category, legacy=True, **kwargs)
+
+    def structured(self, **overrides) -> MemoryWrite:
+        values = {
+            "domain": "Project",
+            "subject": "Alpha",
+            "facts": ["state=active"],
+            "tier": 2,
+            "category": "project",
+        }
+        values.update(overrides)
+        return MemoryWrite.from_mapping(values)
+
+    def test_direct_raw_add_is_fenced_from_cron_style_bypass(self):
+        with self.assertRaises(MemoryContractError) as caught:
+            self.store.add("garbage copied from cron")
+
+        self.assertEqual("legacy_api_disabled", caught.exception.issue.code)
+        self.assertEqual(0, self.store.count())
+
+    def test_explicit_legacy_add_still_validates_format(self):
+        memory_id = self.store.add(
+            "Project:Alpha state=active [Tier=2]",
+            category="project",
+            legacy=True,
+        )
+        self.assertIsNotNone(self.store._get_by_id_raw(memory_id))
+
+        with self.assertRaises(MemoryContractError):
+            self.store.add("subjectless prose", legacy=True)
+
+    def test_direct_dataclass_construction_cannot_bypass_validation(self):
+        invalid = MemoryWrite(
+            domain="Project",
+            subject="Alpha",
+            facts=("nested [Tier=1] marker",),
+            tier=2,
+            category="project",
+        )
+
+        with self.assertRaises(MemoryContractError) as caught:
+            self.store.add_memory(invalid)
+
+        self.assertEqual("nested_tier_marker", caught.exception.issue.code)
+        self.assertEqual(0, self.store.count())
+
+    def test_structured_add_is_idempotent_before_embedding(self):
+        calls = []
+        self.store._embed = lambda content: calls.append(content) or fake_embed(self.store, content)
+        memory = self.structured()
+
+        created = self.store.add_memory(memory)
+        repeated = self.store.add_memory(memory)
+
+        self.assertEqual("created", created["status"])
+        self.assertEqual("idempotent", repeated["status"])
+        self.assertEqual(created["memory_id"], repeated["memory_id"])
+        self.assertEqual(1, len(calls))
+        self.assertEqual(1, self.store.count())
+
+    def test_same_subject_new_details_suggest_update_before_embedding(self):
+        calls = []
+        self.store._embed = lambda content: calls.append(content) or fake_embed(self.store, content)
+        created = self.store.add_memory(self.structured())
+
+        suggested = self.store.add_memory(self.structured(facts=["owner=elo"]))
+
+        self.assertEqual("update_suggested", suggested["status"])
+        self.assertFalse(suggested["success"])
+        self.assertEqual(created["memory_id"], suggested["memory_id"])
+        self.assertEqual(1, len(calls))
+        self.assertEqual(1, self.store.count())
+
+    def test_conflicting_claims_block_before_embedding(self):
+        calls = []
+        self.store._embed = lambda content: calls.append(content) or fake_embed(self.store, content)
+        self.store.add_memory(self.structured(facts=["port=7777"]))
+
+        with self.assertRaises(MemoryContractError) as caught:
+            self.store.add_memory(self.structured(facts=["port=7778"]))
+
+        self.assertEqual("conflicting_claims", caught.exception.issue.code)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(1, self.store.count())
+
+    def test_embedding_failure_is_retryable_and_writes_no_zero_vector(self):
+        self.store._embed = lambda _content: np.zeros(768, dtype=np.float32)
+
+        with self.assertRaises(MemoryEmbeddingError) as caught:
+            self.store.add_memory(self.structured())
+
+        self.assertTrue(caught.exception.retryable)
+        self.assertEqual("embedding_failed", caught.exception.issue.code)
+        self.assertEqual(0, self.store.count())
+
+    def test_explicit_upsert_echoes_replaced_content(self):
+        created = self.store.add_memory(self.structured(facts=["state=active"]))
+        replacement = self.structured(
+            facts=["state=active owner=elo"],
+            write_mode="upsert_subject",
+        )
+
+        result = self.store.add_memory(replacement)
+
+        self.assertEqual("updated", result["status"])
+        self.assertEqual(created["memory_id"], result["memory_id"])
+        self.assertEqual("Project:Alpha state=active [Tier=2]", result["replaced_content"])
+        self.assertEqual(1, self.store.count())
+
+    def test_overly_broad_subject_is_returned_as_warning(self):
+        result = self.store.add_memory(self.structured(subject="Project"))
+
+        self.assertEqual("created", result["status"])
+        self.assertEqual("overly_broad_subject", result["warnings"][0]["code"])
+
+    def test_structured_update_reembeds_and_raw_update_is_fenced(self):
+        created = self.store.add_memory(self.structured())
+        memory_id = created["memory_id"]
+
+        with self.assertRaises(MemoryContractError):
+            self.store.update(memory_id, content="Project:Alpha owner=elo [Tier=2]")
+        with self.assertRaises(MemoryContractError):
+            self.store.update(memory_id, legacy=True, content="subjectless prose")
+
+        result = self.store.update_memory(MemoryPatch.from_mapping({
+            "memory_id": memory_id,
+            "facts": ["state=active owner=elo"],
+        }))
+
+        self.assertEqual("updated", result["status"])
+        self.assertEqual(
+            "Project:Alpha state=active owner=elo [Tier=2]",
+            self.store._get_by_id_raw(memory_id)["content"],
+        )
+
+    def test_portable_import_rejects_malformed_content(self):
+        result = self.store.import_records([{
+            "id": "garbage",
+            "content": "subjectless prose",
+            "category": "fact",
+        }])
+
+        self.assertEqual(0, result["imported"])
+        self.assertEqual(1, result["skipped"])
+        self.assertEqual("missing_tier_marker", result["errors"][0]["error"]["code"])
+        self.assertEqual(0, self.store.count())
 
     def test_relation_label_resolves_to_unique_target_id(self):
         target_id = self.add("Project:Alpha state=active [Tier=2]")
@@ -56,6 +207,7 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertTrue(
             self.store.update(
                 source_id,
+                legacy=True,
                 relations=[{"type": "depends", "target_id": gamma_id}],
             )
         )
@@ -208,7 +360,11 @@ class StoreRetentionTests(unittest.TestCase):
         second_id = self.add("Project:Alpha port=7778 [Tier=2]")
         self.assertEqual(1, len(self.store.get_conflicts(status="open")))
 
-        self.store.update(second_id, content="Project:Alpha port=7777 [Tier=2]")
+        self.store.update(
+            second_id,
+            legacy=True,
+            content="Project:Alpha port=7777 [Tier=2]",
+        )
 
         self.assertEqual([], self.store.get_conflicts(status="open"))
         self.assertEqual(1, len(self.store.get_conflicts(status="resolved")))
@@ -217,10 +373,10 @@ class StoreRetentionTests(unittest.TestCase):
         self.add("Project:Alpha port=7777 [Tier=2]")
         second_id = self.add("Project:Alpha port=7778 [Tier=2]")
 
-        self.assertTrue(self.store.update(second_id, category="insight"))
+        self.assertTrue(self.store.update(second_id, legacy=True, category="insight"))
         self.assertEqual([], self.store.get_conflicts(status="open"))
 
-        self.assertTrue(self.store.update(second_id, category="project"))
+        self.assertTrue(self.store.update(second_id, legacy=True, category="project"))
         self.assertEqual(1, len(self.store.get_conflicts(status="open")))
 
     def test_delete_closes_open_conflicts(self):
@@ -291,6 +447,7 @@ class StoreRetentionTests(unittest.TestCase):
 
         self.assertFalse(self.store.update(
             source_id,
+            legacy=True,
             relations=[{"type": "depends", "target_id": gamma_id}],
         ))
         edges = [edge for edge in self.store.get_typed_edges() if edge["from"] == source_id]
@@ -328,14 +485,23 @@ class StoreRetentionTests(unittest.TestCase):
 
         self.assertFalse(self.store.update(
             source_id,
+            legacy=True,
             relations=[{"type": "depends", "target_id": gamma_id}],
         ))
 
     def test_reintroduced_claim_conflict_reopens_ledger_record(self):
         self.add("Project:Alpha port=7777 [Tier=2]")
         second_id = self.add("Project:Alpha port=7778 [Tier=2]")
-        self.store.update(second_id, content="Project:Alpha port=7777 [Tier=2]")
-        self.store.update(second_id, content="Project:Alpha port=7779 [Tier=2]")
+        self.store.update(
+            second_id,
+            legacy=True,
+            content="Project:Alpha port=7777 [Tier=2]",
+        )
+        self.store.update(
+            second_id,
+            legacy=True,
+            content="Project:Alpha port=7779 [Tier=2]",
+        )
 
         self.assertEqual(1, len(self.store.get_conflicts(status="open")))
         self.assertEqual("7779", self.store.get_conflicts(status="open")[0]["value_b"])
