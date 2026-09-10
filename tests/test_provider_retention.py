@@ -39,6 +39,11 @@ class ProviderRetentionTests(unittest.TestCase):
         self.assertEqual(1, payload["count"])
         self.assertEqual("conflict-1", payload["conflicts"][0]["id"])
 
+        archived = json.loads(self.provider.handle_tool_call(
+            "lancedb_conflicts", {"status": "archived", "limit": 10}
+        ))
+        self.assertEqual(1, archived["count"])
+
     def test_conflicts_tool_resolves_with_audit_fields(self):
         payload = json.loads(self.provider.handle_tool_call(
             "lancedb_conflicts",

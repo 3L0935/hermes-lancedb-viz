@@ -54,6 +54,9 @@ class VizRetentionTests(unittest.TestCase):
         self.assertEqual([{"id": "conflict-1", "status": "open"}], result)
         self.assertEqual([("open", 25, "memory-1")], self.store.calls)
 
+        archived = server.api_get_conflicts({"status": "archived", "limit": "25"})
+        self.assertEqual([{"id": "conflict-1", "status": "archived"}], archived)
+
     def test_conflict_resolution_api_is_auditable(self):
         result = server.api_resolve_conflict("conflict-1", {
             "resolution_note": "approved after review",
@@ -85,6 +88,147 @@ class VizRetentionTests(unittest.TestCase):
                 self.assertEqual(12345, reader.db_size)
             finally:
                 LanceDBStore._embed = original_embed
+
+    def test_export_import_round_trip_preserves_relations_and_conflict_audit(self):
+        original_embed = LanceDBStore._embed
+        LanceDBStore._embed = lambda _self, _text: np.zeros(768, dtype=np.float32)
+        try:
+            with tempfile.TemporaryDirectory() as source_tmp, tempfile.TemporaryDirectory() as dest_tmp:
+                source = LanceDBStore(Path(source_tmp))
+                target_id = source.add("Project:Target state=active [Tier=2]")
+                source_id = source.add(
+                    "Project:Source state=active [Tier=2]",
+                    relations=[
+                        {"type": "depends", "target_id": target_id},
+                        {"type": "uses", "target": "Project:Missing"},
+                    ],
+                )
+                source.add("Project:Claim port=7777 [Tier=2]")
+                claim_id = source.add("Project:Claim port=7778 [Tier=2]")
+                conflict_id = source.get_conflicts(status="open")[0]["id"]
+                source.resolve_conflict(conflict_id, "7778 approved", "elo")
+                server._store_instance = source
+
+                payload = server.export_memories()
+
+                self.assertEqual(1, len(payload["conflicts"]))
+                destination = LanceDBStore(Path(dest_tmp))
+                server._store_instance = destination
+                result = server.import_memories(payload)
+                self.assertTrue(result["success"], result)
+
+                restored = LanceDBStore(Path(dest_tmp))
+                edges = [
+                    edge for edge in restored.get_typed_edges(include_unresolved=True)
+                    if edge["from"] == source_id
+                ]
+                self.assertEqual(2, len(edges))
+                self.assertEqual({target_id, ""}, {edge["to"] for edge in edges})
+                conflicts = restored.get_conflicts(status="resolved", memory_id=claim_id)
+                self.assertEqual(1, len(conflicts))
+                self.assertEqual("human", conflicts[0]["resolution_type"])
+                self.assertEqual("7778 approved", conflicts[0]["resolution_note"])
+                self.assertEqual("elo", conflicts[0]["resolved_by"])
+        finally:
+            LanceDBStore._embed = original_embed
+
+    def test_import_rebuilds_conflicts_when_legacy_export_has_no_registry(self):
+        original_embed = LanceDBStore._embed
+        LanceDBStore._embed = lambda _self, _text: np.zeros(768, dtype=np.float32)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                server._store_instance = LanceDBStore(Path(tmp))
+                result = server.import_memories({"memories": [
+                    {
+                        "id": "claim-a",
+                        "content": "Project:Alpha PORT = 7777 [Tier=2]",
+                        "category": "project",
+                        "relations": [],
+                    },
+                    {
+                        "id": "claim-b",
+                        "content": "Project:Alpha port=7778 [Tier=2]",
+                        "category": "project",
+                        "relations": [],
+                    },
+                ]})
+
+                self.assertTrue(result["success"], result)
+                restored = LanceDBStore(Path(tmp))
+                self.assertEqual(1, len(restored.get_conflicts(status="open")))
+        finally:
+            LanceDBStore._embed = original_embed
+
+    def test_export_uses_typed_edge_table_as_relation_source_of_truth(self):
+        original_embed = LanceDBStore._embed
+        LanceDBStore._embed = lambda _self, _text: np.zeros(768, dtype=np.float32)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                source = LanceDBStore(Path(tmp))
+                target_id = source.add("Project:Target state=active [Tier=2]")
+                source_id = source.add("Project:Source state=active [Tier=2]")
+                source._ensure_edges_table().add([{
+                    "source_id": source_id,
+                    "relation_type": "depends",
+                    "target_id": target_id,
+                    "target_label": "Project:Target",
+                    "created_at": 12.0,
+                }])
+                server._store_instance = source
+
+                payload = server.export_memories()
+
+                exported_source = next(
+                    row for row in payload["memories"] if row["id"] == source_id
+                )
+                self.assertEqual([{
+                    "type": "depends",
+                    "target_id": target_id,
+                    "target": "Project:Target",
+                }], exported_source["relations"])
+                self.assertEqual(1, len(payload["typed_edges"]))
+        finally:
+            LanceDBStore._embed = original_embed
+
+    def test_import_rerun_repairs_relations_after_partial_run(self):
+        original_embed = LanceDBStore._embed
+        LanceDBStore._embed = lambda _self, _text: np.zeros(768, dtype=np.float32)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                store = LanceDBStore(Path(tmp))
+                base_items = [
+                    {"id": "target", "content": "Project:Target state=active [Tier=2]", "category": "project"},
+                    {"id": "source", "content": "Project:Source state=active [Tier=2]", "category": "project"},
+                ]
+                store.import_records(base_items)
+                server._store_instance = store
+                payload = {
+                    "memories": [
+                        dict(base_items[0], relations=[]),
+                        dict(base_items[1], relations=[{
+                            "type": "depends",
+                            "target_id": "target",
+                            "target": "Project:Target",
+                        }]),
+                    ],
+                    "typed_edges": [{
+                        "from": "source",
+                        "to": "target",
+                        "relation_type": "depends",
+                        "target_label": "Project:Target",
+                        "created_at": 1.0,
+                    }],
+                }
+
+                result = server.import_memories(payload)
+
+                self.assertTrue(result["success"], result)
+                self.assertEqual(0, result["imported"])
+                self.assertEqual(2, result["skipped"])
+                restored = LanceDBStore(Path(tmp))
+                self.assertEqual(1, len(restored.get_typed_edges()))
+        finally:
+            LanceDBStore._embed = original_embed
 
     def test_conflicts_page_contract_is_wired(self):
         html = (ROOT / "static" / "index.html").read_text()

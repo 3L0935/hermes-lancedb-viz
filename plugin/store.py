@@ -199,11 +199,28 @@ VALID_RELATION_TYPES = {
     "uses", "extends", "supersedes", "invalidates", "contradicts",
 }
 
+CONFLICT_REGISTRY_RESOLVED_LIMIT = max(
+    0, int(os.environ.get("LANCEDB_CONFLICT_RESOLVED_LIMIT", "1000"))
+)
+
 
 def canonical_subject(content: str) -> str:
     """Return the normalized Domain:Subject key from a memory body."""
     first = (content or "").strip().split(None, 1)[0] if (content or "").strip() else ""
     return first.rstrip(":,.;").lower() if ":" in first else ""
+
+
+def _sql_literal(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _conflict_key(memory_a_id: str, memory_b_id: str, claim_key: str) -> str:
+    """Return a stable logical key for a memory pair and normalized claim key."""
+    import hashlib
+
+    pair = sorted((str(memory_a_id), str(memory_b_id)))
+    raw = "\x1f".join((pair[0], pair[1], str(claim_key).casefold()))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def route_search_mode(query: str) -> str:
@@ -230,18 +247,32 @@ def route_search_mode(query: str) -> str:
 
 
 _CLAIM_PATTERN = re.compile(
-    r"(?<![\w.-])([A-Za-z][A-Za-z0-9_.-]*)=(\"[^\"]*\"|'[^']*'|[^\s]+)"
+    r"(?<![\w.-])([A-Za-z][A-Za-z0-9_.-]*)\s*=\s*"
+    r"(\"[^\"]*\"|'[^']*'|[^\s]+)"
 )
 
 
 def extract_claims(content: str) -> dict[str, str]:
     """Extract explicit key=value claims for conservative conflict checks."""
+    from decimal import Decimal, InvalidOperation
+    import unicodedata
+
     claims = {}
     for key, raw_value in _CLAIM_PATTERN.findall(content or ""):
-        key = key.lower()
+        key = unicodedata.normalize("NFKC", key).casefold()
         if key == "tier":
             continue
-        value = raw_value.strip("\"' ,.;").lower()
+        value = raw_value.strip("\"' ,.;")
+        value = " ".join(unicodedata.normalize("NFKC", value).split()).casefold()
+        if re.fullmatch(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?", value):
+            try:
+                number = Decimal(value)
+                if number.is_finite():
+                    value = format(number.normalize(), "f")
+                    if value == "-0":
+                        value = "0"
+            except InvalidOperation:
+                pass
         if value:
             claims[key] = value
     return claims
@@ -314,6 +345,7 @@ class LanceDBStore:
         self._db = lancedb.connect(str(self._path))
         self._table_name = "memories"
         self._table: "lancedb.table.LanceTable" = self._init_table()
+        self._conflicts_schema_checked = False
         self._db_size = self._compute_db_size()
 
     @property
@@ -584,8 +616,111 @@ class LanceDBStore:
             logger.warning("Failed to read typed relations: %s", error)
             return []
 
+    def _conflict_schema(self):
+        import pyarrow as pa
+        return pa.schema([
+            pa.field("id", pa.string()),
+            pa.field("memory_a_id", pa.string()),
+            pa.field("memory_b_id", pa.string()),
+            pa.field("subject", pa.string()),
+            pa.field("claim_key", pa.string()),
+            pa.field("value_a", pa.string()),
+            pa.field("value_b", pa.string()),
+            pa.field("status", pa.string()),
+            pa.field("confidence", pa.float64()),
+            pa.field("created_at", pa.float64()),
+            pa.field("resolved_at", pa.float64()),
+            pa.field("resolution_type", pa.string()),
+            pa.field("resolution_note", pa.string()),
+            pa.field("resolved_by", pa.string()),
+            pa.field("conflict_key", pa.string()),
+            pa.field("archived_at", pa.float64()),
+        ])
+
+    def _ensure_conflicts_archive_table(self):
+        try:
+            table = self._db.open_table("memory_conflicts_archive")
+            table.checkout_latest()
+            return table
+        except Exception:
+            return self._db.create_table(
+                "memory_conflicts_archive", schema=self._conflict_schema()
+            )
+
+    @staticmethod
+    def _conflict_row_priority(row: dict) -> tuple[int, float, str]:
+        human_resolution = (
+            row.get("status") == "resolved"
+            and row.get("resolution_type") != "auto"
+        )
+        priority = 3 if human_resolution else 2 if row.get("status") == "open" else 1
+        return priority, float(row.get("created_at") or 0.0), str(row.get("id") or "")
+
+    def _normalize_conflict_registry(self, table) -> None:
+        """Backfill logical keys and consolidate legacy duplicate records."""
+        rows = table.to_arrow().to_pylist()
+        for row in rows:
+            logical_key = _conflict_key(
+                row.get("memory_a_id", ""),
+                row.get("memory_b_id", ""),
+                row.get("claim_key", ""),
+            )
+            updates = {}
+            if row.get("conflict_key") != logical_key:
+                updates["conflict_key"] = logical_key
+            if row.get("archived_at") is None:
+                updates["archived_at"] = 0.0
+            if updates:
+                table.update(f"id = {_sql_literal(row['id'])}", updates)
+
+        table.checkout_latest()
+        grouped = {}
+        for row in table.to_arrow().to_pylist():
+            grouped.setdefault(row["conflict_key"], []).append(row)
+        for duplicates in grouped.values():
+            if len(duplicates) < 2:
+                continue
+            keep = max(duplicates, key=self._conflict_row_priority)
+            for duplicate in duplicates:
+                if duplicate["id"] != keep["id"]:
+                    table.delete(f"id = {_sql_literal(duplicate['id'])}")
+
+    def _archive_resolved_conflicts(self, table) -> None:
+        """Keep the hot resolved ledger bounded while retaining cold audit rows."""
+        import pyarrow as pa
+
+        table.checkout_latest()
+        resolved = [
+            row for row in table.to_arrow().to_pylist()
+            if row.get("status") == "resolved"
+        ]
+        overflow = len(resolved) - CONFLICT_REGISTRY_RESOLVED_LIMIT
+        if overflow <= 0:
+            return
+        resolved.sort(key=lambda row: (
+            float(row.get("resolved_at") or row.get("created_at") or 0.0),
+            str(row.get("id") or ""),
+        ))
+        to_archive = []
+        archived_at = time.time()
+        for row in resolved[:overflow]:
+            archived = dict(row)
+            archived["archived_at"] = archived_at
+            to_archive.append(archived)
+
+        archive = self._ensure_conflicts_archive_table()
+        source = pa.Table.from_pylist(to_archive, schema=archive.schema)
+        (
+            archive.merge_insert("conflict_key")
+            .when_matched_update_all()
+            .when_not_matched_insert_all()
+            .execute(source)
+        )
+        for row in to_archive:
+            table.delete(f"id = {_sql_literal(row['id'])}")
+
     def _ensure_conflicts_table(self):
-        """Create or open the deterministic contradiction ledger."""
+        """Create, migrate, and normalize the deterministic contradiction ledger."""
         import pyarrow as pa
         try:
             table = self._db.open_table("memory_conflicts")
@@ -597,34 +732,93 @@ class LanceDBStore:
                 pa.field("resolution_type", pa.string()),
                 pa.field("resolution_note", pa.string()),
                 pa.field("resolved_by", pa.string()),
+                pa.field("conflict_key", pa.string()),
+                pa.field("archived_at", pa.float64()),
             )
             for field in audit_fields:
                 if field.name not in table.schema.names:
                     table.add_columns(field)
                     table.checkout_latest()
-            return table
         except Exception:
-            schema = pa.schema([
-                pa.field("id", pa.string()),
-                pa.field("memory_a_id", pa.string()),
-                pa.field("memory_b_id", pa.string()),
-                pa.field("subject", pa.string()),
-                pa.field("claim_key", pa.string()),
-                pa.field("value_a", pa.string()),
-                pa.field("value_b", pa.string()),
-                pa.field("status", pa.string()),
-                pa.field("confidence", pa.float64()),
-                pa.field("created_at", pa.float64()),
-                pa.field("resolved_at", pa.float64()),
-                pa.field("resolution_type", pa.string()),
-                pa.field("resolution_note", pa.string()),
-                pa.field("resolved_by", pa.string()),
-            ])
-            return self._db.create_table("memory_conflicts", schema=schema)
+            table = self._db.create_table(
+                "memory_conflicts", schema=self._conflict_schema()
+            )
+        if not self._conflicts_schema_checked:
+            self._normalize_conflict_registry(table)
+            self._archive_resolved_conflicts(table)
+            self._conflicts_schema_checked = True
+        return table
+
+    def get_all_conflict_records(self, include_archived: bool = False) -> list[dict]:
+        """Return raw conflict records for lossless export and maintenance."""
+        active = self._ensure_conflicts_table().to_arrow().to_pylist()
+        rows = list(active)
+        if include_archived:
+            rows.extend(self._ensure_conflicts_archive_table().to_arrow().to_pylist())
+        unique = {}
+        for row in rows:
+            key = row.get("conflict_key") or _conflict_key(
+                row.get("memory_a_id", ""), row.get("memory_b_id", ""), row.get("claim_key", "")
+            )
+            previous = unique.get(key)
+            if previous is None or self._conflict_row_priority(row) > self._conflict_row_priority(previous):
+                unique[key] = dict(row)
+        return sorted(
+            unique.values(),
+            key=lambda row: (float(row.get("created_at") or 0.0), str(row.get("id") or "")),
+        )
+
+    def import_conflict_records(self, records: list[dict]) -> int:
+        """Restore exported conflict audit rows using their logical unique key."""
+        from uuid import uuid4
+        import pyarrow as pa
+
+        memory_ids = {str(row["id"]) for row in self._get_all_raw()}
+        normalized = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            memory_a_id = str(record.get("memory_a_id") or "")
+            memory_b_id = str(record.get("memory_b_id") or "")
+            claim_key = str(record.get("claim_key") or "").casefold()
+            if not claim_key or memory_a_id not in memory_ids or memory_b_id not in memory_ids:
+                continue
+            status = record.get("status") if record.get("status") in {"open", "resolved"} else "open"
+            normalized.append({
+                "id": str(record.get("id") or str(uuid4())[:12]),
+                "memory_a_id": memory_a_id,
+                "memory_b_id": memory_b_id,
+                "subject": str(record.get("subject") or ""),
+                "claim_key": claim_key,
+                "value_a": str(record.get("value_a") or ""),
+                "value_b": str(record.get("value_b") or ""),
+                "status": status,
+                "confidence": float(record.get("confidence") or 1.0),
+                "created_at": float(record.get("created_at") or time.time()),
+                "resolved_at": float(record.get("resolved_at") or 0.0),
+                "resolution_type": str(record.get("resolution_type") or ""),
+                "resolution_note": str(record.get("resolution_note") or ""),
+                "resolved_by": str(record.get("resolved_by") or ""),
+                "conflict_key": _conflict_key(memory_a_id, memory_b_id, claim_key),
+                "archived_at": 0.0,
+            })
+        if not normalized:
+            return 0
+        table = self._ensure_conflicts_table()
+        source = pa.Table.from_pylist(normalized, schema=table.schema)
+        (
+            table.merge_insert("conflict_key")
+            .when_matched_update_all()
+            .when_not_matched_insert_all()
+            .execute(source)
+        )
+        self._archive_resolved_conflicts(table)
+        return len(normalized)
 
     def detect_conflicts_for(self, memory_id: str) -> list[dict]:
         """Record explicit same-subject key=value contradictions, without mutation."""
         from uuid import uuid4
+        import pyarrow as pa
 
         current = self._get_by_id_raw(memory_id)
         if not current:
@@ -639,9 +833,11 @@ class LanceDBStore:
             return []
 
         table = self._ensure_conflicts_table()
-        existing_rows = table.to_arrow().to_pylist()
+        existing_rows = self.get_all_conflict_records(include_archived=True)
         existing_by_key = {
-            (frozenset((row["memory_a_id"], row["memory_b_id"])), row["claim_key"]): row
+            row.get("conflict_key") or _conflict_key(
+                row["memory_a_id"], row["memory_b_id"], row["claim_key"]
+            ): row
             for row in existing_rows
         }
         created = []
@@ -657,7 +853,7 @@ class LanceDBStore:
             for claim_key in sorted(set(claims) & set(other_claims)):
                 if claims[claim_key] == other_claims[claim_key]:
                     continue
-                dedupe_key = (frozenset((memory_id, other_id)), claim_key)
+                dedupe_key = _conflict_key(memory_id, other_id, claim_key)
                 existing = existing_by_key.get(dedupe_key)
                 if existing:
                     if existing.get("status") == "open":
@@ -684,8 +880,23 @@ class LanceDBStore:
                         "resolution_type": "",
                         "resolution_note": "",
                         "resolved_by": "",
+                        "conflict_key": dedupe_key,
+                        "archived_at": 0.0,
                     })
-                    table.update(f"id = '{existing['id']}'", values)
+                    if float(existing.get("archived_at") or 0.0) > 0:
+                        restored = dict(existing)
+                        restored.update(values)
+                        source = pa.Table.from_pylist([restored], schema=table.schema)
+                        (
+                            table.merge_insert("conflict_key")
+                            .when_matched_update_all()
+                            .when_not_matched_insert_all()
+                            .execute(source)
+                        )
+                        archive = self._ensure_conflicts_archive_table()
+                        archive.delete(f"id = {_sql_literal(existing['id'])}")
+                    else:
+                        table.update(f"id = {_sql_literal(existing['id'])}", values)
                     existing.update(values)
                     created.append(dict(existing))
                     continue
@@ -704,23 +915,36 @@ class LanceDBStore:
                     "resolution_type": "",
                     "resolution_note": "",
                     "resolved_by": "",
+                    "conflict_key": dedupe_key,
+                    "archived_at": 0.0,
                 }
                 created.append(row)
                 to_insert.append(row)
                 existing_by_key[dedupe_key] = row
         if to_insert:
-            table.add(to_insert)
+            source = pa.Table.from_pylist(to_insert, schema=table.schema)
+            (
+                table.merge_insert("conflict_key")
+                .when_not_matched_insert_all()
+                .execute(source)
+            )
         return created
 
     def get_conflicts(self, status: str = "", limit: int = 100,
                       memory_id: str = "") -> list[dict]:
         """List contradiction records with current memory content for inspection."""
-        table = self._ensure_conflicts_table()
-        rows = table.to_arrow().to_pylist()
+        if status == "archived":
+            rows = [
+                row for row in self.get_all_conflict_records(include_archived=True)
+                if float(row.get("archived_at") or 0.0) > 0
+            ]
+        else:
+            table = self._ensure_conflicts_table()
+            rows = table.to_arrow().to_pylist()
         memories = {str(row["id"]): row for row in self._get_all_raw()}
         result = []
         for row in rows:
-            if status and row.get("status") != status:
+            if status and status != "archived" and row.get("status") != status:
                 continue
             if memory_id and memory_id not in {row.get("memory_a_id"), row.get("memory_b_id")}:
                 continue
@@ -746,6 +970,7 @@ class LanceDBStore:
                     "resolved_by": "system",
                 },
             )
+            self._archive_resolved_conflicts(table)
             return True
         except Exception as error:
             logger.warning("Failed to close conflicts for %s: %s", memory_id, error)
@@ -778,13 +1003,16 @@ class LanceDBStore:
             (item for item in table.to_arrow().to_pylist() if item.get("id") == conflict_id),
             None,
         )
-        return bool(
+        success = bool(
             updated
             and updated.get("status") == "resolved"
             and updated.get("resolution_type") == "human"
             and updated.get("resolution_note") == resolution_note.strip()
             and updated.get("resolved_by") == resolved_by.strip()
         )
+        if success:
+            self._archive_resolved_conflicts(table)
+        return success
 
     # -----------------------------------------------------------------------
     # Embedding
@@ -1007,6 +1235,113 @@ class LanceDBStore:
         except Exception as e:
             logger.error("Delete failed: %s", e)
             return False
+
+    def import_records(self, items: list[dict],
+                       conflict_records: list[dict] | None = None,
+                       edge_records: list[dict] | None = None) -> dict:
+        """Import portable memory rows, then rebuild typed edges and conflicts."""
+        from uuid import uuid4
+
+        self._fresh()
+        existing_by_id = {
+            str(row["id"]): row for row in self._get_all_raw()
+        }
+        existing_ids = set(existing_by_id)
+        imported = 0
+        skipped = 0
+        now = time.time()
+        rows_to_add = []
+        relations_by_id = {}
+
+        for item in items:
+            if not isinstance(item, dict):
+                skipped += 1
+                continue
+            mem_id = str(item.get("id") or "")
+            content = str(item.get("content") or "")
+            relations = item.get("relations") if isinstance(item.get("relations"), list) else []
+            if not content.strip():
+                skipped += 1
+                continue
+            if mem_id and mem_id in existing_ids:
+                skipped += 1
+                if str(existing_by_id[mem_id].get("content") or "") == content:
+                    relations_by_id[mem_id] = relations
+                continue
+            if not mem_id:
+                mem_id = str(uuid4())[:12]
+
+            category = str(item.get("category") or "fact")
+            entities = item.get("entities") if isinstance(item.get("entities"), list) else []
+            tags = item.get("tags") if isinstance(item.get("tags"), list) else []
+            created_at = float(item.get("created_at") or now)
+            try:
+                vector = self._embed(content)
+            except Exception:
+                vector = np.zeros(768, dtype=np.float32)
+
+            rows_to_add.append({
+                "id": mem_id,
+                "content": content,
+                "category": category,
+                "entities": json.dumps(entities),
+                "links": json.dumps([]),
+                "relations": json.dumps(relations),
+                "tags": json.dumps(tags),
+                "quality": float(item.get("quality") or 0.5),
+                "type": str(item.get("type") or category),
+                "source": str(item.get("source") or "import"),
+                "session_id": str(item.get("session_id") or ""),
+                "user_id": str(item.get("user_id") or "hermes-user"),
+                "created_at": created_at,
+                "updated_at": float(item.get("updated_at") or now),
+                "access_count": int(item.get("access_count") or 0),
+                "accessed_at": float(item.get("accessed_at") or created_at),
+                "vector": vector.tolist(),
+            })
+            relations_by_id[mem_id] = relations
+            existing_ids.add(mem_id)
+            imported += 1
+
+        if edge_records is not None:
+            for mem_id in relations_by_id:
+                relations_by_id[mem_id] = []
+            for edge in edge_records:
+                if not isinstance(edge, dict):
+                    continue
+                source_id = str(edge.get("from") or edge.get("source_id") or "")
+                if source_id not in relations_by_id:
+                    continue
+                relations_by_id[source_id].append({
+                    "type": str(edge.get("relation_type") or edge.get("type") or ""),
+                    "target_id": str(edge.get("to") or edge.get("target_id") or ""),
+                    "target": str(edge.get("target_label") or edge.get("target") or ""),
+                })
+
+        if rows_to_add:
+            self._table.add(rows_to_add)
+
+        edge_count = 0
+        for mem_id, relations in relations_by_id.items():
+            normalized = self._write_relations_list(mem_id, relations)
+            self._table.update(
+                f"id = {_sql_literal(mem_id)}",
+                {"relations": json.dumps(normalized)},
+            )
+            edge_count += len(normalized)
+
+        self._rebuild_all_links()
+        for mem_id in relations_by_id:
+            self.detect_conflicts_for(mem_id)
+        restored = self.import_conflict_records(conflict_records or [])
+        self._update_db_size()
+        return {
+            "success": True,
+            "imported": imported,
+            "skipped": skipped,
+            "relations_rebuilt": edge_count,
+            "conflicts_restored": restored,
+        }
 
     def bulk_delete(self, memory_ids: list[str]) -> dict:
         """Delete multiple memories. Returns {deleted: N, errors: [...]}."""

@@ -287,8 +287,8 @@ _CONFLICTS_SCHEMA = {
             },
             "status": {
                 "type": "string",
-                "enum": ["", "open", "resolved"],
-                "description": "Filter by state; empty returns all records.",
+                "enum": ["", "open", "resolved", "archived"],
+                "description": "Filter by state/storage; empty returns the hot registry.",
             },
             "memory_id": {
                 "type": "string",
@@ -720,8 +720,8 @@ class LanceDBMemoryProvider(MemoryProvider):
             if action != "list":
                 return tool_error("action must be list or resolve")
             status = args.get("status", "")
-            if status not in {"", "open", "resolved"}:
-                return tool_error("status must be empty, open, or resolved")
+            if status not in {"", "open", "resolved", "archived"}:
+                return tool_error("status must be empty, open, resolved, or archived")
             conflicts = self._store.get_conflicts(
                 status=status,
                 memory_id=args.get("memory_id", ""),

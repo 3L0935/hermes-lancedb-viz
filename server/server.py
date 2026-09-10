@@ -712,10 +712,26 @@ def update_memory_entities(data: dict) -> dict:
 
 
 def export_memories() -> dict:
-    """Export all memories as clean JSON array (no vectors)."""
+    """Export memories, typed relations, and conflict audit rows without vectors."""
     try:
         store = _get_store()
         memories = store.get_all()
+        typed_edges = sorted(
+            store.get_typed_edges(include_unresolved=True),
+            key=lambda edge: (
+                str(edge.get("from", "")),
+                str(edge.get("to", "")),
+                str(edge.get("relation_type", "")),
+                str(edge.get("target_label", "")),
+            ),
+        )
+        relations_by_source = {}
+        for edge in typed_edges:
+            relations_by_source.setdefault(edge["from"], []).append({
+                "type": edge["relation_type"],
+                "target_id": edge["to"],
+                "target": edge["target_label"],
+            })
         # Strip vectors, keep only useful fields
         clean = []
         for m in memories:
@@ -725,7 +741,7 @@ def export_memories() -> dict:
                 "category": m.get("category", "fact"),
                 "entities": m.get("entities", []),
                 "links": m.get("links", []),
-                "relations": m.get("relations", []),
+                "relations": relations_by_source.get(m["id"], m.get("relations", [])),
                 "tags": m.get("tags", []),
                 "quality": m.get("quality", 0.5),
                 "type": m.get("type", m.get("category", "fact")),
@@ -733,81 +749,36 @@ def export_memories() -> dict:
                 "updated_at": m.get("updated_at", 0),
                 "access_count": m.get("access_count", 0),
             })
-        return {"memories": clean, "count": len(clean)}
+        conflicts = store.get_all_conflict_records(include_archived=True)
+        return {
+            "memories": clean,
+            "typed_edges": typed_edges,
+            "conflicts": conflicts,
+            "count": len(clean),
+            "conflict_count": len(conflicts),
+        }
     except Exception as e:
         return {"error": str(e), "memories": []}
 
 
 def import_memories(data: dict) -> dict:
-    """Import memories from JSON. Skips duplicates by ID, rebuilds links."""
+    """Import memories and rebuild typed edges plus the conflict registry."""
     items = data.get("memories", [])
     if not isinstance(items, list) or not items:
         return {"error": "Missing or empty 'memories' array"}
 
     try:
         store = _get_store()
-        existing_ids = {m["id"] for m in store.get_all()}
-        imported, skipped = 0, 0
-        now = time.time()
-        rows_to_add = []
-
-        for item in items:
-            mem_id = item.get("id", "")
-            content = item.get("content", "")
-            if not content or not content.strip():
-                skipped += 1
-                continue
-            if mem_id and mem_id in existing_ids:
-                skipped += 1
-                continue
-
-            # Generate ID if missing
-            from uuid import uuid4
-            if not mem_id:
-                mem_id = str(uuid4())[:12]
-
-            category = item.get("category", "fact")
-            entities = item.get("entities", [])
-            tags = item.get("tags", [])
-            quality = item.get("quality", 0.5)
-            mem_type = item.get("type", category)
-            created_at = item.get("created_at", now)
-            access_count = item.get("access_count", 0)
-
-            # Embed the content
-            try:
-                vector = store._embed(content)
-            except Exception:
-                import numpy as np
-                vector = np.zeros(768, dtype=np.float32)
-
-            rows_to_add.append({
-                "id": mem_id,
-                "content": content,
-                "category": category,
-                "entities": json.dumps(entities),
-                "links": json.dumps([]),
-                "tags": json.dumps(tags),
-                "quality": quality,
-                "type": mem_type,
-                "source": "import",
-                "session_id": "",
-                "user_id": "hermes-user",
-                "created_at": created_at,
-                "updated_at": now,
-                "access_count": access_count,
-                "vector": vector,
-            })
-            imported += 1
-
-        if rows_to_add:
-            store._table.add(rows_to_add)
-
-        # Rebuild all links (entities may have changed due to new memories)
-        _rebuild_all_links(store, existing_ids | {r["id"] for r in rows_to_add})
-
+        edge_records = data.get("typed_edges")
+        if not isinstance(edge_records, list):
+            edge_records = None
+        result = store.import_records(
+            items,
+            data.get("conflicts", []),
+            edge_records=edge_records,
+        )
         _reset_store()
-        return {"success": True, "imported": imported, "skipped": skipped}
+        return result
     except Exception as e:
         _reset_store()
         return {"error": str(e), "imported": 0, "skipped": 0}
@@ -953,8 +924,8 @@ def api_get_conflicts(params: dict) -> list:
     """GET /api/conflicts - deterministic contradiction ledger."""
     try:
         status = params.get("status", "")
-        if status not in {"", "open", "resolved"}:
-            return {"error": "status must be empty, open, or resolved"}
+        if status not in {"", "open", "resolved", "archived"}:
+            return {"error": "status must be empty, open, resolved, or archived"}
         store = _get_store()
         return store.get_conflicts(
             status=status,

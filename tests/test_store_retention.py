@@ -1,10 +1,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
-from plugin.store import LanceDBStore, route_search_mode
+from plugin.store import LanceDBStore, extract_claims, route_search_mode
 
 
 def fake_embed(_self, text: str) -> np.ndarray:
@@ -363,6 +364,82 @@ class StoreRetentionTests(unittest.TestCase):
         self.add("Project:Alpha port=7777 owner=elo [Tier=2]")
         self.add("Project:Alpha port=7777 state=active [Tier=2]")
         self.assertEqual([], self.store.get_conflicts())
+
+    def test_claim_parser_accepts_spacing_case_and_typed_values(self):
+        self.assertEqual(
+            {
+                "port": "7777",
+                "ratio": "1",
+                "enabled": "true",
+                "owner": "élo user",
+            },
+            extract_claims(
+                'Project:Alpha PORT = 07777 ratio=1.00 enabled = TRUE owner="Élo   User"'
+            ),
+        )
+
+    def test_formatting_only_claim_differences_do_not_conflict(self):
+        self.add('Project:Alpha PORT=07777 ratio=1.0 owner="Élo User" [Tier=2]')
+        self.add('Project:Alpha port = 7777 RATIO = 1.00 owner="élo   user" [Tier=2]')
+
+        self.assertEqual([], self.store.get_conflicts(status="open"))
+
+    def test_claim_key_casing_still_detects_a_real_contradiction(self):
+        self.add("Project:Alpha PORT=7777 [Tier=2]")
+        self.add("Project:Alpha port=7778 [Tier=2]")
+
+        conflicts = self.store.get_conflicts(status="open")
+        self.assertEqual(1, len(conflicts))
+        self.assertEqual("port", conflicts[0]["claim_key"])
+
+    def test_conflict_registry_consolidates_duplicate_logical_rows(self):
+        first_id = self.add("Project:Alpha port=7777 [Tier=2]")
+        second_id = self.add("Project:Alpha port=7778 [Tier=2]")
+        conflict = self.store.get_conflicts(status="open")[0]
+        duplicate = {
+            key: value for key, value in conflict.items()
+            if key not in {"memory_a_content", "memory_b_content"}
+        }
+        duplicate["id"] = "duplicate-id"
+        self.store._ensure_conflicts_table().add([duplicate])
+
+        self.store._conflicts_schema_checked = False
+        conflicts = self.store.get_conflicts()
+
+        self.assertEqual(1, len(conflicts))
+        self.assertEqual(
+            {first_id, second_id},
+            {conflicts[0]["memory_a_id"], conflicts[0]["memory_b_id"]},
+        )
+
+    def test_resolved_conflict_overflow_is_archived_without_losing_audit(self):
+        pairs = []
+        for index in range(3):
+            first_id = self.add(f"Project:Archive{index} port=7777 [Tier=2]")
+            second_id = self.add(f"Project:Archive{index} port=7778 [Tier=2]")
+            conflict_id = self.store.get_conflicts(status="open", memory_id=second_id)[0]["id"]
+            pairs.append((first_id, second_id, conflict_id))
+
+        with patch("plugin.store.CONFLICT_REGISTRY_RESOLVED_LIMIT", 2):
+            for _, _, conflict_id in pairs:
+                self.assertTrue(self.store.resolve_conflict(
+                    conflict_id,
+                    resolution_note=f"reviewed {conflict_id}",
+                    resolved_by="elo",
+                ))
+
+        self.assertEqual(2, len(self.store.get_conflicts(status="resolved")))
+        self.assertEqual(1, len(self.store.get_conflicts(status="archived")))
+        exported = self.store.get_all_conflict_records(include_archived=True)
+        self.assertEqual(3, len(exported))
+        self.assertTrue(any(float(row.get("archived_at") or 0) > 0 for row in exported))
+
+        archived_pair = next(
+            (first_id, second_id) for first_id, second_id, conflict_id in pairs
+            if any(row["id"] == conflict_id and row.get("archived_at") for row in exported)
+        )
+        self.store.detect_conflicts_for(archived_pair[1])
+        self.assertEqual([], self.store.get_conflicts(status="open", memory_id=archived_pair[1]))
 
     def test_legacy_edge_schema_adds_target_id_without_losing_rows(self):
         import pyarrow as pa
