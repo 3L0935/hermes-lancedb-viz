@@ -22,7 +22,7 @@ HERMES_AGENT = os.path.expanduser("~/.hermes/hermes-agent")
 
 sys.path.insert(0, HERMES_AGENT)
 
-from plugins.memory.lancedb.store import LanceDBStore
+from plugins.memory.lancedb.store import LanceDBStore, MemoryPatch
 
 
 def find_duplicate_groups(store: LanceDBStore, threshold: float = 0.92) -> list[list[dict]]:
@@ -204,7 +204,10 @@ def run_merge(store: LanceDBStore, threshold: float, apply: bool = False) -> dic
             # Merge tags into keeper
             merged_tags = merge_tags(keeper, duplicates)
             if merged_tags != (keeper.get("tags") or []):
-                store.update(keeper["id"], tags=merged_tags)
+                store.update_memory(MemoryPatch.from_mapping({
+                    "memory_id": keeper["id"],
+                    "tags": merged_tags,
+                }))
                 print(f"  -> Merged tags: {merged_tags}")
 
             # Delete duplicates
