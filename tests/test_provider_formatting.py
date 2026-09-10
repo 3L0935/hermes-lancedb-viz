@@ -128,6 +128,7 @@ class ProviderFormattingTests(unittest.TestCase):
         ))
 
         self.assertIsInstance(self.store.updated, MemoryPatch)
+        self.assertIsNone(self.store.updated.relations)
         self.assertTrue(payload["success"])
         self.assertEqual(
             "Project:Alpha port=7777 [Tier=2]",

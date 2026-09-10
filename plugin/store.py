@@ -1324,16 +1324,17 @@ class LanceDBStore:
                 "warnings": warning_dicts,
             }
 
+        if same_subject and conflicts:
+            raise self._contract_error(
+                "conflicting_claims",
+                "facts",
+                "same-subject write conflicts with existing explicit claims",
+                conflicts,
+                "resolve the conflict or update the existing memory by ID",
+            )
+
         if same_subject and memory.write_mode == "create":
             existing = same_subject[0]
-            if conflicts:
-                raise self._contract_error(
-                    "conflicting_claims",
-                    "facts",
-                    "same-subject write conflicts with existing explicit claims",
-                    conflicts,
-                    "resolve the conflict or explicitly update the existing memory",
-                )
             return {
                 "success": False,
                 "status": "update_suggested",
@@ -1441,9 +1442,13 @@ class LanceDBStore:
             relations_to_replace = None
 
             if "content" in kwargs and kwargs["content"]:
+                had_relation_block = bool(re.search(
+                    r"::\s*relations\s*::", kwargs["content"], re.IGNORECASE
+                ))
                 clean_content, relations_json = self._strip_relations_from_content(kwargs["content"])
                 updates["content"] = clean_content
-                relations_to_replace = json.loads(relations_json)
+                if had_relation_block:
+                    relations_to_replace = json.loads(relations_json)
                 # Re-extract entities
                 updates["entities"] = json.dumps(extract_entities(clean_content))
                 # Re-embed
@@ -1622,6 +1627,9 @@ class LanceDBStore:
         if not existing:
             return False
         if "content" in kwargs and kwargs["content"]:
+            had_relation_block = bool(re.search(
+                r"::\s*relations\s*::", kwargs["content"], re.IGNORECASE
+            ))
             clean_content, relation_json = self._strip_relations_from_content(kwargs["content"])
             relations = kwargs.get("relations", json.loads(relation_json))
             parsed = parse_content(
@@ -1631,7 +1639,8 @@ class LanceDBStore:
             )
             kwargs["content"] = render_content(parsed)
             kwargs["category"] = parsed.category
-            kwargs["relations"] = [relation.to_dict() for relation in parsed.relations]
+            if "relations" in kwargs or had_relation_block:
+                kwargs["relations"] = [relation.to_dict() for relation in parsed.relations]
         elif "category" in kwargs and kwargs["category"] not in VALID_CATEGORIES:
             raise self._contract_error(
                 "invalid_category", "category", "unknown category is rejected",

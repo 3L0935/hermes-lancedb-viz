@@ -144,6 +144,21 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertEqual("Project:Alpha state=active [Tier=2]", result["replaced_content"])
         self.assertEqual(1, self.store.count())
 
+    def test_upsert_subject_does_not_override_conflicting_claims(self):
+        created = self.store.add_memory(self.structured(facts=["port=7777"]))
+
+        with self.assertRaises(MemoryContractError) as caught:
+            self.store.add_memory(self.structured(
+                facts=["port=7778"],
+                write_mode="upsert_subject",
+            ))
+
+        self.assertEqual("conflicting_claims", caught.exception.issue.code)
+        self.assertEqual(
+            "Project:Alpha port=7777 [Tier=2]",
+            self.store._get_by_id_raw(created["memory_id"])["content"],
+        )
+
     def test_overly_broad_subject_is_returned_as_warning(self):
         result = self.store.add_memory(self.structured(subject="Project"))
 
@@ -169,6 +184,21 @@ class StoreRetentionTests(unittest.TestCase):
             "Project:Alpha state=active owner=elo [Tier=2]",
             self.store._get_by_id_raw(memory_id)["content"],
         )
+
+    def test_content_update_preserves_relations_when_patch_omits_them(self):
+        target_id = self.add("Project:Target state=active [Tier=2]")
+        source_id = self.add(
+            "Project:Source state=active [Tier=2]",
+            relations=[{"type": "depends", "target_id": target_id}],
+        )
+
+        self.store.update_memory(MemoryPatch.from_mapping({
+            "memory_id": source_id,
+            "facts": ["state=ready"],
+        }))
+
+        edges = [edge for edge in self.store.get_typed_edges() if edge["from"] == source_id]
+        self.assertEqual([target_id], [edge["to"] for edge in edges])
 
     def test_portable_import_rejects_malformed_content(self):
         result = self.store.import_records([{

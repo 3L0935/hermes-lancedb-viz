@@ -562,8 +562,11 @@ class LanceDBMemoryProvider(MemoryProvider):
                 "facts": list(replacement.facts),
                 "tier": replacement.tier,
                 "category": replacement.category,
-                "relations": [relation.to_dict() for relation in replacement.relations],
             }
+            if "relations" in args:
+                patch_data["relations"] = [
+                    relation.to_dict() for relation in replacement.relations
+                ]
             for field in ("tags", "quality", "type"):
                 if field in args:
                     patch_data[field] = args[field]
