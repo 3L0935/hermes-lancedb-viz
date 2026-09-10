@@ -60,9 +60,15 @@ def _import_store_module():
     import importlib.util
     canonical = HERMES_HOME / "plugins" / "lancedb" / "store.py"
     if canonical.exists():
-        name = "lancedb_store_canonical"
+        import types
+        package_name = "lancedb_store_canonical"
+        name = f"{package_name}.store"
         if name in sys.modules:
             return sys.modules[name]
+        package = types.ModuleType(package_name)
+        package.__path__ = [str(canonical.parent)]
+        package.__package__ = package_name
+        sys.modules[package_name] = package
         spec = importlib.util.spec_from_file_location(name, canonical)
         mod = importlib.util.module_from_spec(spec)
         sys.modules[name] = mod
@@ -89,6 +95,41 @@ def _reset_store():
     global _store_instance
     _store_instance = None
     _invalidate_cache()
+
+
+def _contract_symbols(store):
+    """Resolve contract classes from the same module family as the store."""
+    module = sys.modules.get(type(store).__module__)
+    if module and hasattr(module, "MemoryPatch") and hasattr(module, "parse_content"):
+        return module.MemoryPatch, module.parse_content
+    from plugin.memory_contract import MemoryPatch, parse_content
+    return MemoryPatch, parse_content
+
+
+def _structured_update(store, memory_id: str, data: dict) -> dict:
+    """Translate the viz's legacy content form into a strict typed patch."""
+    MemoryPatch, parse_content = _contract_symbols(store)
+    patch_data = {"memory_id": memory_id}
+    content = data.get("content")
+    if content:
+        existing = store._get_by_id_raw(memory_id)
+        category = data.get("category") or (
+            str(existing.get("category") or "fact") if existing else "fact"
+        )
+        parsed = parse_content(content, category=category)
+        patch_data.update({
+            "domain": parsed.domain,
+            "subject": parsed.subject,
+            "facts": list(parsed.facts),
+            "tier": parsed.tier,
+            "category": parsed.category,
+        })
+    elif "category" in data:
+        patch_data["category"] = data["category"]
+    for field in ("tags", "quality", "type", "relations"):
+        if field in data:
+            patch_data[field] = data[field]
+    return store.update_memory(MemoryPatch.from_mapping(patch_data))
 
 
 # ---------------------------------------------------------------------------
@@ -683,9 +724,15 @@ def update_memory(data: dict) -> dict:
             updates["category"] = category
         if not updates:
             return {"error": "No fields to update"}
-        if store.update(memory_id, **updates):
+        result = _structured_update(store, memory_id, updates)
+        if result.get("success"):
             _invalidate_cache()
-            return {"success": True, "message": "Memory updated"}
+            return {
+                "success": True,
+                "message": "Memory updated",
+                "canonical_content": result.get("canonical_content"),
+                "replaced_content": result.get("replaced_content"),
+            }
         return {"error": "Memory not found or update failed"}
     except Exception as e:
         return {"error": str(e)}
@@ -1000,10 +1047,15 @@ def api_update_memory(memory_id: str, data: dict) -> dict:
                 kwargs[key] = data[key]
         if not kwargs:
             return {"error": "No fields to update"}
-        ok = store.update(memory_id, **kwargs)
-        if ok:
+        result = _structured_update(store, memory_id, kwargs)
+        if result.get("success"):
             _invalidate_cache()
-            return {"success": True, "message": f"Memory {memory_id} updated"}
+            return {
+                "success": True,
+                "message": f"Memory {memory_id} updated",
+                "canonical_content": result.get("canonical_content"),
+                "replaced_content": result.get("replaced_content"),
+            }
         return {"error": "Memory not found or update failed"}
     except Exception as e:
         return {"error": str(e)}
@@ -1067,8 +1119,8 @@ def api_bulk_type(data: dict) -> dict:
         errors = []
         for mid in memory_ids:
             try:
-                ok = store.update(mid, type=mem_type)
-                if ok:
+                result = _structured_update(store, mid, {"type": mem_type})
+                if result.get("success"):
                     updated += 1
                 else:
                     errors.append(mid)

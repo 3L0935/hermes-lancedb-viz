@@ -14,9 +14,20 @@ from typing import Any, Dict, List
 from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 
-from .store import LanceDBStore  # noqa: F401 — used in initialize()
+from .memory_contract import MemoryContractError, MemoryPatch, MemoryWrite
+from .store import LanceDBStore, MemoryEmbeddingError  # noqa: F401 — used in initialize()
 
 logger = logging.getLogger(__name__)
+
+
+def _write_error(error: Exception) -> str:
+    if isinstance(error, (MemoryContractError, MemoryEmbeddingError)):
+        return json.dumps({
+            "success": False,
+            "error": error.to_dict(),
+            "retryable": bool(getattr(error, "retryable", False)),
+        }, ensure_ascii=False, default=str)
+    return tool_error(str(error))
 
 # ---------------------------------------------------------------------------
 # Tool schemas
@@ -65,61 +76,63 @@ _SEARCH_SCHEMA = {
     },
 }
 
+_CATEGORY_VALUES = [
+    "project", "tech", "fact", "correction", "user_pref", "decision",
+    "insight", "reference", "pattern", "question",
+]
+_RELATION_VALUES = [
+    "part_of", "depends", "requires", "runs_on", "connects_to", "uses",
+    "extends", "supersedes", "invalidates", "contradicts",
+]
+_RELATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "type": {"type": "string", "enum": _RELATION_VALUES},
+        "target_id": {"type": "string", "minLength": 1},
+        "target": {"type": "string", "minLength": 1},
+    },
+    "required": ["type"],
+    "oneOf": [
+        {"required": ["target_id"], "not": {"required": ["target"]}},
+        {"required": ["target"], "not": {"required": ["target_id"]}},
+    ],
+    "additionalProperties": False,
+}
+_STRUCTURED_WRITE_PROPERTIES = {
+    "domain": {"type": "string", "minLength": 1, "maxLength": 32},
+    "subject": {"type": "string", "minLength": 1, "maxLength": 80},
+    "facts": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 12,
+        "items": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "description": "Dense inline facts; key=value and concise prose are both valid.",
+    },
+    "tier": {"type": "integer", "enum": [1, 2, 3]},
+    "category": {"type": "string", "enum": _CATEGORY_VALUES},
+    "relations": {"type": "array", "maxItems": 20, "items": _RELATION_SCHEMA},
+}
+_STRUCTURED_REQUIRED = ["domain", "subject", "facts", "tier", "category"]
+
 _ADD_SCHEMA = {
     "name": "lancedb_add",
     "description": (
-        "Store a durable fact in LanceDB vector memory. "
-        "Auto-extracts entities and builds links to related memories. "
-        "Use for project details, user preferences, tech stack, bugs, "
-        "decisions — anything you'll want to recall later.\n\n"
-        "PREFERRED: use domain + subject + content + tier (structured fields). "
-        "The handler assembles 'Domain:Subject info [Tier=N]' automatically.\n"
-        "LEGACY: pass a single 'content' string — must include Domain:Subject prefix and [Tier=N] suffix."
+        "Store one validated durable memory from structured fields. "
+        "create is non-destructive and returns update_suggested for an existing subject. "
+        "Use upsert_subject only when replacement is explicitly intended."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "content": {
+            **_STRUCTURED_WRITE_PROPERTIES,
+            "write_mode": {
                 "type": "string",
-                "description": (
-                    "Fact details (keys and values). "
-                    "PREFERRED: omit this and use domain+subject+content+tier instead — the handler builds the full string. "
-                    "LEGACY only: pass the full string 'Domain:Subject key=value key=value. [Tier=N]' — must include the prefix and tier marker."
-                ),
-            },
-            "domain": {
-                "type": "string",
-                "description": "Domain namespace for clustering (e.g. Hermes, Projet, Tech, User, Correction, Fact, Config). Forms the 'Domain:' prefix.",
-            },
-            "subject": {
-                "type": "string",
-                "description": "Specific subject within the domain (e.g. Service, Profile, GPU, Pipeline). Forms ':Subject' suffix — combined with domain to form 'Domain:Subject' key.",
-            },
-            "tier": {
-                "type": "string",
-                "enum": ["1", "2", "3"],
-                "description": "Importance tier: 1=critical (bugs, corrections, commands), 2=useful (stack, URLs, archi), 3=contextual (notes de fond). REQUIRED when using domain+subject.",
-            },
-            "category": {
-                "type": "string",
-                "enum": ["project", "tech", "fact", "correction", "user_pref", "decision", "insight", "reference", "pattern", "question"],
-                "description": "Category for grouping in the graph (default: 'fact'). Priority order: correction > pattern > decision > user_pref > reference > insight > project > tech > fact > question. Pick the highest applicable.",
-            },
-            "relations": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "type": {"type": "string", "enum": ["part_of", "depends", "requires", "runs_on", "connects_to", "uses", "extends", "supersedes", "invalidates", "contradicts"]},
-                        "target_id": {"type": "string"},
-                        "target": {"type": "string"},
-                    },
-                    "required": ["type"],
-                },
-                "description": "Optional typed links. Prefer target_id from lancedb_search; target labels resolve only when unique.",
+                "enum": ["create", "upsert_subject"],
+                "default": "create",
             },
         },
-        "required": [],  # Use EITHER content (legacy) OR domain+subject+tier (+ optional content)
+        "required": _STRUCTURED_REQUIRED,
+        "additionalProperties": False,
     },
 }
 
@@ -142,55 +155,37 @@ _GRAPH_SCHEMA = {
 _UPDATE_SCHEMA = {
     "name": "lancedb_update",
     "description": (
-        "Update an existing memory in-place by ID. "
-        "Re-embeds automatically if content changes, re-extracts entities, and re-writes relations. "
-        "Prefer this over delete+recreate when the memory's identity hasn't changed — only its details.\\n\\n"
-        "Pass memory_id + any combination of fields to update. Only provided fields are changed."
+        "Replace an existing memory by ID using a complete structured canonical form. "
+        "The response echoes both canonical and replaced content."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "memory_id": {
                 "type": "string",
-                "description": "ID of the memory to update. Get from lancedb_search or lancedb_get.",
+                "minLength": 1,
+                "description": "Existing memory ID from search or get.",
             },
-            "content": {
-                "type": "string",
-                "description": "New content text. Use the structured format: 'Domain:Subject key=value key=value. [Tier=N]'. Triggers re-embed + entity extraction + relation rewrite.",
-            },
-            "category": {
-                "type": "string",
-                "enum": ["project", "tech", "fact", "correction", "user_pref", "decision", "insight", "reference", "pattern", "question"],
-                "description": "New category for the memory.",
-            },
+            **_STRUCTURED_WRITE_PROPERTIES,
             "tags": {
                 "type": "array",
+                "maxItems": 20,
                 "items": {"type": "string"},
                 "description": "New tags (replaces existing tags entirely).",
             },
             "quality": {
                 "type": "number",
-                "description": "Manual quality override (0-1). Omit to keep auto-computed quality.",
+                "minimum": 0,
+                "maximum": 1,
             },
             "type": {
                 "type": "string",
-                "description": "New sub-type (granular type within the category).",
-            },
-            "relations": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "type": {"type": "string"},
-                        "target_id": {"type": "string"},
-                        "target": {"type": "string"},
-                    },
-                    "required": ["type"],
-                },
-                "description": "Replacement set of typed links. An empty list clears outgoing relations.",
+                "minLength": 1,
+                "maxLength": 80,
             },
         },
-        "required": ["memory_id"],
+        "required": ["memory_id", *_STRUCTURED_REQUIRED],
+        "additionalProperties": False,
     },
 }
 
@@ -498,60 +493,30 @@ class LanceDBMemoryProvider(MemoryProvider):
             return tool_error(str(e))
 
     def _handle_add(self, args: dict) -> str:
-        content = args.get("content", "")
-        domain = args.get("domain", "")
-        subject = args.get("subject", "")
-        tier = args.get("tier", "")
-        category = args.get("category", "fact")
-
-        # Mode 1: structured fields — assemble Domain:Subject key=value [Tier=N]
-        if domain or subject or tier:
-            if not domain:
-                return tool_error("domain is required when using structured fields")
-            if not subject:
-                return tool_error("subject is required when using structured fields")
-            if not tier:
-                return tool_error("tier is required when using structured fields (1=critical, 2=useful, 3=contextual)")
-
-            content = f"{domain}:{subject}"
-            if content_body := args.get("content", "").strip():
-                content += f" {content_body}"
-            content += f" [Tier={tier}]"
-        # Mode 2: legacy — use content as-is
-        else:
-            if not content.strip():
-                return tool_error("content is required (use EITHER 'content' alone OR 'domain+subject+tier+content')")
-
-        # Validate category against enum
-        VALID_CATEGORIES = {"project", "tech", "fact", "correction", "user_pref", "decision", "insight", "reference", "pattern", "question"}
-        if category not in VALID_CATEGORIES:
-            category = "fact"
         try:
-            write_warnings = []
-            mem_id = self._store.add(
-                content,
-                category=category,
-                relations=args.get("relations") if isinstance(args.get("relations"), list) else None,
-                warnings=write_warnings,
-            )
+            memory = MemoryWrite.from_mapping(args)
+            result = self._store.add_memory(memory)
+            memory_id = result.get("memory_id", "")
             try:
                 potential_conflicts = self._store.get_conflicts(
-                    status="open", memory_id=mem_id, limit=20
+                    status="open", memory_id=memory_id, limit=20
                 )
             except Exception as error:
                 potential_conflicts = []
-                warning = f"Conflict listing failed after memory write: {error}"
-                logger.warning("%s", warning)
-                write_warnings.append(warning)
-            return json.dumps({
-                "success": True,
-                "memory_id": mem_id,
-                "potential_conflicts": potential_conflicts,
-                "warnings": write_warnings,
-                "message": f"Memory stored: {content[:80]}...",
-            }, ensure_ascii=False)
-        except Exception as e:
-            return tool_error(str(e))
+                warning = {
+                    "code": "conflict_listing_failed",
+                    "field": "conflicts",
+                    "message": "memory result is valid but conflict listing failed",
+                    "received": str(error),
+                    "expected": "readable conflict registry",
+                }
+                logger.warning("Conflict listing failed after memory write: %s", error)
+                result.setdefault("warnings", []).append(warning)
+            result["potential_conflicts"] = potential_conflicts
+            result["message"] = f"Memory {result['status']}: {result['canonical_content'][:80]}..."
+            return json.dumps(result, ensure_ascii=False, default=str)
+        except Exception as error:
+            return _write_error(error)
 
     def _handle_graph(self, args: dict) -> str:
         try:
@@ -584,45 +549,31 @@ class LanceDBMemoryProvider(MemoryProvider):
             return tool_error(str(e))
 
     def _handle_update(self, args: dict) -> str:
-        memory_id = args.get("memory_id", "")
-        if not memory_id:
-            return tool_error("memory_id is required")
-
-        # Collect fields to update — only non-empty ones
-        update_kwargs = {}
-        if "content" in args and args["content"]:
-            update_kwargs["content"] = args["content"]
-        if "category" in args and args["category"]:
-            update_kwargs["category"] = args["category"]
-        if "tags" in args and isinstance(args["tags"], list):
-            update_kwargs["tags"] = args["tags"]
-        if "quality" in args and isinstance(args["quality"], (int, float)):
-            update_kwargs["quality"] = float(args["quality"])
-        if "type" in args and args["type"]:
-            update_kwargs["type"] = args["type"]
-        if "relations" in args and isinstance(args["relations"], list):
-            update_kwargs["relations"] = args["relations"]
-
-        if not update_kwargs:
-            return tool_error("No fields to update. Provide at least one of: content, category, tags, quality, type.")
-
         try:
-            ok = self._store.update(memory_id, **update_kwargs)
-            if ok:
-                # Fetch updated memory to return the new state
-                mem = self._store.get_by_id(memory_id)
-                return json.dumps({
-                    "success": True,
-                    "memory_id": memory_id,
-                    "updated_fields": list(update_kwargs.keys()),
-                    "memory": mem,
-                }, ensure_ascii=False, default=str)
-            return json.dumps({
-                "success": False,
-                "message": f"Memory {memory_id} not found or no changes applied.",
+            replacement = MemoryWrite.from_mapping({
+                field: args[field]
+                for field in (*_STRUCTURED_REQUIRED, "relations")
+                if field in args
             })
-        except Exception as e:
-            return tool_error(str(e))
+            patch_data = {
+                "memory_id": args.get("memory_id"),
+                "domain": replacement.domain,
+                "subject": replacement.subject,
+                "facts": list(replacement.facts),
+                "tier": replacement.tier,
+                "category": replacement.category,
+                "relations": [relation.to_dict() for relation in replacement.relations],
+            }
+            for field in ("tags", "quality", "type"):
+                if field in args:
+                    patch_data[field] = args[field]
+            result = self._store.update_memory(MemoryPatch.from_mapping(patch_data))
+            result["updated_fields"] = [
+                field for field in args if field != "memory_id"
+            ]
+            return json.dumps(result, ensure_ascii=False, default=str)
+        except Exception as error:
+            return _write_error(error)
 
     def _handle_get(self, args: dict) -> str:
         memory_id = args.get("memory_id", "")

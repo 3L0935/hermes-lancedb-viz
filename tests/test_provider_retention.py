@@ -8,9 +8,15 @@ class FakeStore:
     def __init__(self):
         self.added = None
 
-    def add(self, content, category="fact", relations=None, warnings=None):
-        self.added = (content, category, relations)
-        return "new-id"
+    def add_memory(self, memory):
+        self.added = memory
+        return {
+            "success": True,
+            "status": "created",
+            "memory_id": "new-id",
+            "canonical_content": "Project:Alpha port=7778 [Tier=2]",
+            "warnings": [],
+        }
 
     def get_conflicts(self, status="", limit=100, memory_id=""):
         rows = [{"id": "conflict-1", "status": "open", "memory_b_id": "new-id"}]
@@ -72,15 +78,15 @@ class ProviderRetentionTests(unittest.TestCase):
             {
                 "domain": "Project",
                 "subject": "Alpha",
-                "tier": "2",
-                "content": "port=7778",
+                "tier": 2,
+                "facts": ["port=7778"],
                 "category": "project",
             },
         ))
 
         self.assertTrue(payload["success"])
         self.assertEqual(1, len(payload["potential_conflicts"]))
-        self.assertEqual("new-id", self.provider._store.added[0] and "new-id")
+        self.assertEqual(("port=7778",), self.provider._store.added.facts)
 
     def test_add_returns_warning_without_failing_when_conflict_listing_fails(self):
         self.provider._store.get_conflicts = lambda **_kwargs: (_ for _ in ()).throw(
@@ -92,8 +98,8 @@ class ProviderRetentionTests(unittest.TestCase):
             {
                 "domain": "Project",
                 "subject": "Alpha",
-                "tier": "2",
-                "content": "port=7777",
+                "tier": 2,
+                "facts": ["port=7777"],
                 "category": "project",
             },
         ))
@@ -101,7 +107,7 @@ class ProviderRetentionTests(unittest.TestCase):
         self.assertTrue(payload["success"])
         self.assertEqual([], payload["potential_conflicts"])
         self.assertEqual(1, len(payload["warnings"]))
-        self.assertIn("ledger unavailable", payload["warnings"][0])
+        self.assertIn("ledger unavailable", payload["warnings"][0]["received"])
 
 
 if __name__ == "__main__":

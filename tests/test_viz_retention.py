@@ -32,9 +32,16 @@ class FakeUpdateStore:
     def __init__(self):
         self.calls = []
 
-    def update(self, memory_id, **kwargs):
-        self.calls.append((memory_id, kwargs))
-        return True
+    def _get_by_id_raw(self, memory_id):
+        return {"id": memory_id, "category": "project"}
+
+    def update_memory(self, memory_patch):
+        self.calls.append(memory_patch)
+        return {
+            "success": True,
+            "canonical_content": "Project:Alpha port=7778 [Tier=2]",
+            "replaced_content": "Project:Alpha port=7777 [Tier=2]",
+        }
 
 
 class VizRetentionTests(unittest.TestCase):
@@ -266,7 +273,7 @@ class VizRetentionTests(unittest.TestCase):
         self.assertIsNotNone(match)
         self.assertRegex(match.group("body"), r"\bageShadow\s*=")
 
-    def test_legacy_update_routes_through_store_update(self):
+    def test_legacy_update_routes_through_structured_store_update(self):
         update_store = FakeUpdateStore()
         server._store_instance = update_store
 
@@ -276,13 +283,12 @@ class VizRetentionTests(unittest.TestCase):
             "category": "project",
         })
 
-        self.assertEqual({"success": True, "message": "Memory updated"}, result)
-        self.assertEqual([
-            ("memory-1", {
-                "content": "Project:Alpha port=7778 [Tier=2]",
-                "category": "project",
-            })
-        ], update_store.calls)
+        self.assertTrue(result["success"])
+        self.assertEqual("Project:Alpha port=7778 [Tier=2]", result["canonical_content"])
+        self.assertEqual(1, len(update_store.calls))
+        patch = update_store.calls[0]
+        self.assertEqual("memory-1", patch.memory_id)
+        self.assertEqual(("port=7778",), patch.facts)
 
     def test_server_has_no_direct_table_update_and_graph_uses_memory_endpoint(self):
         source = (ROOT / "server" / "server.py").read_text()

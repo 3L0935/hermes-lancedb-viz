@@ -47,7 +47,7 @@ wait_for_http() {
 }
 
 run install -d "$CANONICAL" "$RUNTIME" "$VIZ/static" "$(dirname "$UNIT")"
-for file in store.py __init__.py plugin.yaml; do
+for file in store.py memory_contract.py __init__.py plugin.yaml; do
   run install -m 0644 "$ROOT/plugin/$file" "$CANONICAL/$file"
   run install -m 0644 "$ROOT/plugin/$file" "$RUNTIME/$file"
 done
