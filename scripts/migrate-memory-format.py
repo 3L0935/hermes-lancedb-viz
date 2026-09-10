@@ -167,6 +167,7 @@ def apply_plan(
                 legacy=True,
                 content=row["canonical_content"],
                 category=row["category"],
+                links_rebuild_done=True,
             )
             if ok:
                 updated += 1
@@ -178,6 +179,9 @@ def apply_plan(
                 "code": getattr(getattr(error, "issue", None), "code", "update_failed"),
                 "message": str(error),
             })
+    # Single link rebuild for the whole batch (O(n) once instead of O(n*rows)).
+    if updated:
+        store._rebuild_all_links()
     return {"updated": updated, "errors": errors}
 
 

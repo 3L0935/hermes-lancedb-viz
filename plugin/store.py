@@ -1494,8 +1494,7 @@ class LanceDBStore:
                     {"relations": json.dumps(normalized_relations), "updated_at": now},
                 )
 
-            # Rebuild links if entities changed
-            if "entities" in updates:
+            if "entities" in updates and "links_rebuild_done" not in kwargs:
                 self._rebuild_all_links()
 
             return True
