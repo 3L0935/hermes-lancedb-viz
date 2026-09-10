@@ -1,107 +1,253 @@
 ---
 name: memory-writing
-description: "Use when creating, updating, auditing, or migrating durable LanceDB memories through the strict structured write contract."
-version: 9.0.0
+description: "Règles pour écrire dans LanceDB via lancedb_add. Format, quoi mettre, quoi éviter."
+version: 7.0.0
 triggers:
   - lancedb_add
-  - lancedb_update
   - write memory
-  - memory audit
+  - memory add
+  - memory cleanup
+  - clean memory
+  - outdated memory
+  - memory full
 ---
 
-# Memory writing
+# Memory Writing — Utilisation de lancedb_add
 
-Use structured fields and let the plugin contract normalize, validate, and
-render the persisted content. Do not reconstruct the canonical string, copy
-contract regexes, or repair rejected payloads in background automation.
+Le tool a ete etendu (v5) — il accepte maintenant les champs structures `domain`, `subject`, `tier` en plus du `content` libre. **PREFERER la syntaxe structuree** : le handler assemble automatiquement le format correct.
 
-## Choose the destination
+## Strict write contract (10/09/2026)
+Le plugin enforce maintenant un write contract: domain/subject/facts/tier/category requis, category invalide = REJET (plus de fallback fact), sujet trop large = warning, fingerprint exact = idempotent (re-add du meme contenu retourne l'ID existant), meme sujet avec claims conflictuelles = blocage, embedding echoue = erreur retryable (jamais de zero-vector). Legacy store.add(str) = interdit hors migration. Content avec prefixe [Tier=] ou Domain: duplique = rejet. Toute la normalisation est automatique cote store (NFKC, trim, casing).
 
-- Use the host application's always-loaded memory for identity and global
-  interaction conventions, following that application's permission policy.
-- Use LanceDB for durable facts, configuration, corrections, decisions,
-  patterns, and references that should be retrieved on demand.
-- Do not store secrets, transient task status, build identifiers, or facts with
-  a short expected lifetime.
-
-## Choose the operation
-
-Search first with `lancedb_search` when the subject may already exist.
-
-- Use `lancedb_add` with `write_mode="create"` (the default) for a new subject.
-  An existing subject returns `update_suggested`; it is never overwritten.
-- Use `lancedb_update` with the existing memory ID and its complete structured
-  form when intentionally correcting or extending that memory.
-- Use `write_mode="upsert_subject"` only when the subject is known to identify
-  exactly one memory, the new claims do not conflict, and replacement is
-  explicitly intended. The response includes `replaced_content` for review.
-- Treat `conflicting_claims` as a blocked write requiring resolution, not as a
-  reason to merge automatically.
-
-Both write tools require `domain`, `subject`, `facts`, `tier`, and `category`.
-`facts` accepts dense `key=value` strings and concise single-sentence facts,
-with up to 12 facts, 1,000 characters per fact, and 2,000 characters in total.
-Pass relations in the structured `relations` field. Never pass a preformatted
-content wrapper or `::relations::` block to an agent tool.
-
-Example:
+## Structure recommandee (v6.1 — strict contract)
 
 ```python
 lancedb_add(
-    domain="Project",
-    subject="ApiGateway",
-    facts=["transport=SSE", "port=7777", "reconnect uses exponential backoff"],
-    tier=2,
-    category="tech",
-    write_mode="create",
+    domain="Hermes",        # namespace : Hermes, Projet, Tech, User, Correction, Config
+    subject="Kanban",        # sujet specifique (PAS trop large: Correction:Hermes-Dashboard, pas Correction:Hermes)
+    content="key=value autre=info",  # ou facts=[...] — le corps, sans prefixe ni suffixe
+    tier="1",                # obligatoire : 1, 2 ou 3
+    category="tech"          # Categorie pour le graphe
 )
 ```
 
-## Classification
+Le handler produit automatiquement : `Hermes:Kanban key=value autre=info [Tier=1]`
 
-Category priority when several apply:
+## Syntaxe legacy (toujours supportee)
 
-`correction > pattern > decision > user_pref > reference > insight > project > tech > fact > question`
+```python
+lancedb_add(content="Hermes:Kanban key=value autre=info [Tier=1]", category="tech")
+```
 
-Tier policy:
+Mais **les nouveaux champs sont preferes** — pas de risque de mauvais format.
 
-- Tier 1: a correction, safety rule, critical command, or recurring failure.
-- Tier 2: reusable configuration, architecture, endpoint, or workflow fact.
-- Tier 3: durable background context.
+## Quand utiliser LanceDB
 
-Use a component-, bug-, or decision-specific subject. A generic subject or a
-subject equal to its domain is accepted with `overly_broad_subject`; refine it
-to avoid unrelated conflict matches.
+Tout ce qui est technique, factuel, durable. Projets, bugs, corrections, stack, préférences, décisions, patterns, références.
 
-## Interpret write results
+## Quand utiliser memory() à la place
 
-- `created`: a new row was embedded and stored.
-- `idempotent`: the exact canonical memory already exists; reuse its ID.
-- `update_suggested`: `create` found the same subject; inspect the returned
-  existing ID and content, then update by ID if replacement is appropriate.
-- `conflicting_claims`: an explicit same-subject `key=value` claim differs;
-  resolve the conflict before writing.
-- `ambiguous_subject`: subject-level upsert matched multiple rows; search and
-  choose an exact memory ID.
+Ce qui définit qui est l'utilisateur : nom, OS, GPU, personnalité, conventions durables. Le built-in (~2200 chars) est injecté à chaque session — pas de technique dedans.
 
-Successful and preflight responses echo `canonical_content`. Updates and
-successful subject upserts also echo `replaced_content`. Errors are structured
-as `code`, `field`, `message`, `received`, and `expected`; retry only when the
-top-level `retryable` value is true.
+Test : "c'est qui l'utilisateur ?" → memory(). "Comment fixer X ?" → lancedb_add().
 
-## Relations
+## Built-in Memory Maintenance (periodic cleanup)
 
-Prefer `target_id` obtained from search. A `target` label resolves only when it
-matches one memory unambiguously. Supported relation types are `part_of`,
-`depends`, `requires`, `runs_on`, `connects_to`, `uses`, `extends`,
-`supersedes`, `invalidates`, and `contradicts`.
+Les built-in MEMORY.md et USER.md se remplissent vite. La règle "tech → LanceDB, user → built-in" dérive avec le temps. Prévoir un cleanup quand l'usage dépasse 85%.
 
-## Automation and audits
+**Emplacement actuel (Hermes ≥v0.18) :** `~/.hermes/memories/MEMORY.md` et `~/.hermes/memories/USER.md`. Plus à `~/.hermes/memory.md` / `~/.hermes/user.md` (anciens chemins, obsolètes).
 
-Terminal-only automation must construct `MemoryWrite` / `MemoryPatch` and call
-`add_memory` / `update_memory`. Raw `store.add` and `store.update` are fenced
-legacy adapters reserved for controlled import and migration code.
+**Vérifier l'occupation :**
+```bash
+wc -c ~/.hermes/memories/MEMORY.md ~/.hermes/memories/USER.md
+```
+Capacité max ~2500 chars pour MEMORY.md, ~2500 pour USER.md. Au-delà de 85% (~2125 chars), déclencher un cleanup.
 
-Run `scripts/audit-memory-format.py` for cron monitoring. It is read-only and
-emits JSON. Use `--fail-on-drift` in CI. Automation reports drift; it does not
-rewrite live rows. Remediation belongs in the reviewed migration workflow.
+**Vérifier le provider actif :**
+```bash
+hermes memory status
+```
+Affiche le provider (lancedb, builtin, etc.) et les plugins installés.
+
+### Workflow de cleanup (MEMORY.md)
+
+1. **Scanner** chaque entrée : est-ce que c'est TECHNIQUE (chemins, versions, configs, URLs, projets) ou DURABLE (style élo, meta-règles, préférences fondamentales) ?
+2. **Sauver dans LanceDB** tout ce qui est technique avec le format structuré :
+   ```
+   lancedb_add(domain="Tech", subject="ComfyUI", content="path=/ssd/comfyui/ venv=rocm6.3", tier="2", category="tech")
+   ```
+3. **Supprimer de MEMORY.md** en éditant le fichier `~/.hermes/memories/MEMORY.md` — retirer les lignes techniques, une par une. Chaque entrée est séparée par `§` (ligne vide avec `§` seul). Utiliser `patch` ou `write_file` pour réécrire le fichier nettoyé.
+4. **Garder une mini-ligne** pour les trucs utiles en session sans encombrer : ex "Atomic Mail MCP (npx @atomicmail/mcp). Inbox: xana_hermes@atomicmail.ai."
+
+### Workflow de cleanup (USER.md)
+
+1. **Chercher les redites** : si deux entrées disent la même chose (ex "UI préf mobileAgent" qui répète "UI general"), fusionner en une.
+2. **Migrer les borderlines** : les préférences techniques sur des projets spécifiques (ex "Veut workflows ComfyUI V2 avec ControlNet") peuvent aller dans LanceDB en `user_pref` :
+   ```
+   lancedb_add(domain="Pref", subject="ComfyUI", content="workflows V2 ControlNet required deep research avant chaque création", tier="2", category="user_pref")
+   ```
+3. **Règle USER.md** : si c'est pas intrinsèquement "qui est elo", ça part.
+
+### Ce qui reste dans MEMORY.md (built-in)
+
+- Style de travail ("fais le taf", pas 3x confirmation, debug racine)
+- Méta-règles (built-in vs LanceDB, skills backup)
+- Préférences durables (skills minimales, tasks scoped)
+- Liens critiques compacts (Atomic Mail inbox, etc.)
+- **Rien** qui soit un chemin, une version, une config, une URL longue, ou une procédure
+
+### Ce qui reste dans USER.md (built-in)
+
+- UI preferences (OLED, glass bubbles, drawer+burger)
+- Workflow ("fais le taf", no wrapper, tasks scoped)
+- Voix préférée (Suno/YuE chant, pas TTS)
+- **Rien** qui soit projet-spécifique ou technique
+
+### Quand déclencher un cleanup
+
+- MEMORY.md > 85% full (~2125 chars)
+- USER.md > 80% full (~2000 chars)
+- À la demande du user ("nettoie la mémoire", "enlève les trucs tech")
+- Après une session qui a ajouté 3+ entry techniques dans le built-in
+
+### ⚠️ Pitfall: Built-in delete requires user confirmation
+
+**La suppression d'entrées du built-in est interdite sans confirmation explicite de l'utilisateur** (règle SOUL.md). En cron ou en session normale, tu peux migrer les entrées techniques vers LanceDB, mais tu dois **signaler dans ton rapport** que les entrées built-in correspondantes méritent d'être supprimées — ne les supprime pas toi-même.
+
+**Workflow correct quand MEMORY.md > 85% :**
+1. Migrer les entrées techniques vers LanceDB (carte blanche)
+2. **Ne PAS supprimer** les entrées correspondantes de MEMORY.md
+3. Signaler dans le rapport : "⚠️ Built-in: [sujet] mériterait d'être supprimé de MEMORY.md — confirmation nécessaire"
+4. Attendre la confirmation de l'utilisateur pour agir
+
+**Symptôme si tu ignores cette règle :** tu supprimes une entrée built-in que l'utilisateur considère importante, et l'info est perdue (pas de undo sur memory tool).
+
+### ⚠️ Pitfall: MEMORY.md path change (Hermes ≥v0.18)
+
+Depuis Hermes v0.18, les fichiers built-in sont dans `~/.hermes/memories/MEMORY.md` et `~/.hermes/memories/USER.md`. Les anciens chemins `~/.hermes/memory.md` et `~/.hermes/user.md` n'existent plus. Ne pas utiliser `memory(action="remove", ...)` — l'outil memory tool a été remplacé par l'édition directe des fichiers.
+
+**Symptôme si tu utilises les anciens chemins :** `ls: cannot access '/home/elo/.hermes/memory.md'` — le fichier n'existe pas à cet emplacement.
+
+**Fix :** Toujours utiliser `~/.hermes/memories/MEMORY.md` et `~/.hermes/memories/USER.md`. Vérifier avec `hermes memory status` pour confirmer le provider actif.
+
+## Workflow avant chaque write
+
+0. skill_view('memory-writing') — charger ce skill
+1. Vérifier les duplicats + entités existantes à lier
+   - **En session normale** : utiliser `lancedb_search()` (tool plugin)
+   - **En cron/terminal-only** : `lancedb_search` et `lancedb_add` ne sont PAS disponibles (toolsets restreints). Fallback obligatoire via Python direct :
+     ```python
+     cd ~/.hermes/hermes-agent && venv/bin/python3 -c "
+     import sys; sys.path.insert(0, '.')
+     from plugins.memory.lancedb.store import LanceDBStore
+     store = LanceDBStore('/home/elo/.hermes/lancedb')
+     results = store.search('ma query', top_k=5)
+     # NOTE: store.search() returns a LIST of dicts, not a dict with 'results' key
+     for r in results:
+         print(r.get('content','')[:80])
+     "
+     ```
+2. Choisir les champs structures (recommande) ou le format legacy
+3. Écrire dans LanceDB
+   - **En session normale** : `lancedb_add(domain=..., subject=..., content=..., tier=..., category=...)`
+   - **En cron/terminal-only** : utiliser `terminal` avec Python direct :
+     ```python
+     # Ajouter une nouvelle entrée
+     store.add(f"{domain}:{subject} {content} [Tier={tier}]", category)
+     # Mettre à jour une entrée existante (in-place, preserve UUID + links)
+     store.update("memory-uuid", content="Hermes:Kanban new details [Tier=1]")
+     store.update("memory-uuid", category="tech", tags=["python", "docker"])
+     ```
+     Vérifier les duplicats avec `store.search()` avant d'ajouter. Pour les mises à jour d'entrées existantes, préférer `store.update()` (in-place, preserves UUID + links, re-embed automatique si content change).
+
+**Toujours preferer les champs structures** : `domain`, `subject`, `tier` sont valides par le handler, le format est garanti.
+
+## Format interne (assemble par le handler)
+
+Le handler produit automatiquement :
+
+    Domaine:Sujet corps_de_l_info [Tier=N]
+
+Ne pas ecrire le prefixe `Domaine:` ni `[Tier=N]` dans le champ `content` — passe-les via `domain`, `subject` et `tier`.
+
+## Catégories par priorité
+
+correction > pattern > decision > user_pref > reference > insight > project > tech > fact > question
+
+Prends la plus haute applicable.
+
+## Tiers
+
+Tier 1 = friction immédiate (bug, correction, commande critique)
+Tier 2 = utile récurrent (stack, URLs, archi)
+Tier 3 = contextuel (notes de fond)
+
+## Relations (v7 : champ structuré recommandé)
+
+Passe une liste `relations` à lancedb_add / lancedb_update (préférable au bloc legacy) :
+
+```
+relations=[{"type": "depends", "target_id": "<uuid>"}]
+```
+
+- `target_id` = UUID exact d'une mémoire existante (lancedb_search d'abord pour l'obtenir).
+- `target` (label) résolu seulement si le Domain:Subject ou sujet court matche UNE seule mémoire ; sinon conservé sans résolution (pas de guess).
+- Update avec `relations` = remplacement complet des edges sortants (pas d'empilement).
+- Delete nettoie automatiquement les edges entrants et sortants.
+- Types valides : part_of, depends, requires, runs_on, connects_to, uses, extends, supersedes, invalidates, contradicts.
+- Legacy `::relations:: type=cible` après [Tier=N] reste parsé au add.
+
+## Conflits (détection locale, 09/2026)
+
+Au add/update de content, détection DÉTERMINISTE sans LLM : mêmes Domain:Subject + même clé key=value avec valeurs différentes (catégories decision/correction/project/user_pref/tech/fact) → enregistrement dans `memory_conflicts`. Les deux mémoires restent intactes. `lancedb_add` retourne `potential_conflicts` ; tool `lancedb_conflicts` liste le registre (status/memory_id/limit) ; page Conflicts du viz. Corriger un contenu ferme les conflits ouverts et recheck. Un conflit réintroduit se rouvre automatiquement.
+
+## Mettre a jour une memoire (lancedb_update)
+
+Utiliser `lancedb_update` pour editer une memoire **in-place** quand les details changent mais que l'identite reste la meme. Preferer ça a delete+recreate — ça preserve l'UUID, les links, et l'historique d'acces.
+
+```
+lancedb_update(memory_id, content="Hermes:Kanban new details [Tier=1]")
+lancedb_update(memory_id, category="correction")
+lancedb_update(memory_id, tags=["python", "docker"])
+```
+
+Updater `content` declenche un re-embed automatique. Les autres champs (category, tags, quality, type) ne re-embed pas.
+
+**Quand update vs create new :**
+- **Update** : meme fait, details changes (URL deplacee, version bump, correction appliquee)
+- **Create new** : fait different, nouveau sujet, nouveau domaine
+
+## Interdits dans le contenu
+
+Task progress (PR #42, "Phase 3 faite"), commit SHAs, données éphémères < 7 jours, paragraphes ou blocs de texte.
+
+## Pitfall: Doublon de préfixe Domaine: + double [Tier=] dans le cron fallback
+
+Quand tu utilises le fallback cron/terminal-only (`store.add(f"{domain}:{subject} {content} [Tier={tier}]")`), le `content` peut déjà contenir le préfixe `Domaine:` ou le suffixe `[Tier=N]` si tu l'as copié depuis une entrée existante ou depuis un output de `store.search()`. Résultat: `Ollama:ModelRetirement Ollama:ModelRetirement ... [Tier=1] [Tier=1]`.
+
+**Symptôme:** Entrée avec préfixe dupliqué, double marqueur de tier, tags pourris (ex: `ollama:modelretirement` extrait comme entité).
+
+**Fix:** Avant d'appeler `store.add()` dans le cron fallback, vérifie que le content n'a pas déjà le préfixe:
+```python
+import re
+# Nettoyage avant add()
+if content.startswith(f"{domain}:"):
+    content = content[len(f"{domain}:"):].strip()
+content = re.sub(r'\s*\[Tier=\d+\]\s*$', '', content).strip()
+# Maintenant safe
+store.add(f"{domain}:{subject} {content} [Tier={tier}]", category)
+```
+
+**Règle:** Toujours stripper le préfixe et le suffixe `[Tier=]` du content avant de le repasser dans le template `f"{domain}:{subject} {content} [Tier={tier}]"`. Surtout quand le content vient d'un `store.search()` ou d'un `store._get_all_raw()`.
+
+## Pitfalls — ce qui génère des tags pourris
+
+Les tags sont auto-extraits du contenu. Ces patterns créent des tags garbage (même si _is_valid_tag() en bloque la plupart, mieux vaut ne pas les générer) :
+
+- **Chemins** : `~/github/`, `/home/`, `%h/`
+- **Key=value avec path** : `Path=~/project/`, `Config=~/.config/x.yaml`
+- **File extensions** : `setup.py`, `config.yaml`
+- **Special chars** : `(speaker_id)`, `[config]`, `foo/bar`
+- **Pure numbers** : seuls dans un token
+
+**Solution** : paraphraser. `Path=~/github/monprojet/` → `Dossier=monprojet`. `config.yaml` → `config yaml`. `get_enabled()` → `get_enabled`.

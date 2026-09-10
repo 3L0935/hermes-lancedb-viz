@@ -1,7 +1,7 @@
 ---
 name: lancedb-memory-system
 description: "Architecture LanceDB locale — store, viz, scripts. Pas de format ici (voir memory-writing)."
-version: 4.2.1
+version: 5.0.0
 triggers:
   - "lancedb memory"
   - "vector memory"
@@ -25,7 +25,9 @@ Architecture et déploiement du stockage vectoriel local.
 ~/.config/systemd/user/lancedb-viz.service      <- unit systemd (versionnee dans le repo)
 ```
 
-**Viz** : systemd user unit (depuis 06/09/2026), port **7778**, host 127.0.0.1. Deploy + sync : `./scripts/deploy-local.sh` depuis le repo. Docker (7777) = historique legacy.
+**Viz** : **Docker container `lancedb-viz` sur port 7777 = UI canonique pour elo** (decision 10/09/2026, pointé par le Hermes Hub). Le 7778 systemd (deploy-local.sh) = doublon de secours, PAS l'accès principal.
+**Pitfall restart 7777** : le container sert le code du repo par bind mounts (static:ro, server.py:ro) mais le process Python ne recharge pas tout seul — **`docker restart lancedb-viz` obligatoire après toute modif server.py** (sinon nouvel endpoint → fallback HTML → "Unexpected token '<'" côté frontend). static/ seul = pas de restart.
+Deploy + sync : `./scripts/deploy-local.sh` depuis le repo (unit systemd 7778). Docker legacy (7777) = référence UI.
 **Store** : plugin memory du repo Hermes — `memory.provider: lancedb` dans config.yaml.
 **Frontend** : SPA 10 pages en vanilla JS dans `static/`. Liste paginee (20/page), timeline, tags, duplicates, conflicts, embedding scatter plot, clusters, stale, graph (vis-network).
 
