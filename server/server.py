@@ -675,22 +675,17 @@ def update_memory(data: dict) -> dict:
 
     try:
         store = _get_store()
-        existing = store.get_by_id(memory_id)
-        if not existing:
-            return {"error": "Memory not found"}
-
-        imports = __import__("time")
-
         updates = {}
         if content:
             updates["content"] = content
         if category:
             updates["category"] = category
-        updates["updated_at"] = imports.time()
-
-        store._table.update(f"id = '{memory_id}'", updates)
-
-        return {"success": True, "message": "Memory updated"}
+        if not updates:
+            return {"error": "No fields to update"}
+        if store.update(memory_id, **updates):
+            _invalidate_cache()
+            return {"success": True, "message": "Memory updated"}
+        return {"error": "Memory not found or update failed"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -819,36 +814,7 @@ def import_memories(data: dict) -> dict:
 
 def _rebuild_all_links(store, memory_ids: set) -> None:
     """Rebuild links for all memories based on shared entities (2+ threshold)."""
-    # Load stop list from store module
-    try:
-        store_mod = _import_store_module()
-        _STOP_ENTITIES = getattr(store_mod, "_STOP_ENTITIES", set())
-    except ImportError:
-        _STOP_ENTITIES = set()
-
-    all_memories = store._get_all_raw()
-    # Build index: mem_id -> set of significant entities
-    mem_sigs = {}
-    for m in all_memories:
-        mid = m["id"]
-        if mid not in memory_ids:
-            continue
-        entities = json.loads(m.get("entities", "[]"))
-        sig = {e for e in entities if e not in _STOP_ENTITIES}
-        mem_sigs[mid] = sig
-
-    # Compute links
-    mid_list = list(mem_sigs.keys())
-    for i, mid in enumerate(mid_list):
-        linked = []
-        for j, other in enumerate(mid_list):
-            if i == j:
-                continue
-            shared = mem_sigs[mid] & mem_sigs[other]
-            if len(shared) >= 2:
-                linked.append(other)
-        linked = linked[:8]
-        store._table.update(f"id = '{mid}'", {"links": json.dumps(linked)})
+    store._rebuild_all_links()
 
 
 def get_memory_detail(memory_id: str, threshold: float = 0.65) -> dict:
@@ -1052,16 +1018,11 @@ def api_access_memory(memory_id: str) -> dict:
         return {"error": "Missing memory_id"}
     try:
         store = _get_store()
-        raw = store._get_by_id_raw(memory_id)
-        if not raw:
+        memory = store.get_by_id(memory_id)
+        if not memory:
             return {"error": "Memory not found"}
-        new_count = (raw.get("access_count", 0) or 0) + 1
-        store._table.update(f"id = '{memory_id}'", {
-            "access_count": new_count,
-            "accessed_at": time.time(),
-        })
         _invalidate_cache()
-        return {"success": True, "access_count": new_count}
+        return {"success": True, "access_count": memory["access_count"]}
     except Exception as e:
         return {"error": str(e)}
 

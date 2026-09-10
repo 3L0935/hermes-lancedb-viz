@@ -8,7 +8,7 @@ class FakeStore:
     def __init__(self):
         self.added = None
 
-    def add(self, content, category="fact", relations=None):
+    def add(self, content, category="fact", relations=None, warnings=None):
         self.added = (content, category, relations)
         return "new-id"
 
@@ -50,6 +50,27 @@ class ProviderRetentionTests(unittest.TestCase):
         self.assertTrue(payload["success"])
         self.assertEqual(1, len(payload["potential_conflicts"]))
         self.assertEqual("new-id", self.provider._store.added[0] and "new-id")
+
+    def test_add_returns_warning_without_failing_when_conflict_listing_fails(self):
+        self.provider._store.get_conflicts = lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("ledger unavailable")
+        )
+
+        payload = json.loads(self.provider.handle_tool_call(
+            "lancedb_add",
+            {
+                "domain": "Project",
+                "subject": "Alpha",
+                "tier": "2",
+                "content": "port=7777",
+                "category": "project",
+            },
+        ))
+
+        self.assertTrue(payload["success"])
+        self.assertEqual([], payload["potential_conflicts"])
+        self.assertEqual(1, len(payload["warnings"]))
+        self.assertIn("ledger unavailable", payload["warnings"][0])
 
 
 if __name__ == "__main__":

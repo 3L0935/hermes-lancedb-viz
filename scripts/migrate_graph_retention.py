@@ -103,8 +103,6 @@ def migrate(db_path: Path, apply: bool = False) -> dict:
         if row["resolution"] == "orphaned_source":
             edge_table.delete(f"source_id = {_sql(source_id)}")
             continue
-        if row["resolution"] != "resolved":
-            continue
         relation_type = str(row.get("relation_type") or "")
         target_label = str(row.get("target_label") or "")
         where = (

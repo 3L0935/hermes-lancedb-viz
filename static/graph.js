@@ -524,7 +524,7 @@ async function saveEdit(nodeId) {
     if (name) entityTags.push(name);
   });
   try {
-    const r1 = await fetch('/api/update', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({memory_id: nodeId, content: newContent, category: newCategory}) });
+    const r1 = await fetch('/api/memories/' + nodeId, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({content: newContent, category: newCategory}) });
     const d1 = await r1.json();
     if (d1.error) { alert('Erreur: ' + d1.error); return; }
     const r2 = await fetch('/api/update_entities', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({memory_id: nodeId, entities: entityTags}) });

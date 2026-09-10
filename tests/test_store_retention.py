@@ -141,6 +141,22 @@ class StoreRetentionTests(unittest.TestCase):
         self.store.detect_conflicts_for(second_id)
         self.assertEqual(1, len(self.store.get_conflicts(status="open")))
 
+    def test_add_succeeds_and_reports_warning_when_conflict_detection_fails(self):
+        warnings = []
+        self.store.detect_conflicts_for = lambda _memory_id: (_ for _ in ()).throw(
+            RuntimeError("ledger unavailable")
+        )
+
+        memory_id = self.add(
+            "Project:Alpha port=7777 [Tier=2]",
+            warnings=warnings,
+        )
+
+        self.assertIsNotNone(self.store._get_by_id_raw(memory_id))
+        self.assertEqual(1, self.store.count())
+        self.assertEqual(1, len(warnings))
+        self.assertIn("ledger unavailable", warnings[0])
+
     def test_updating_claims_closes_stale_conflicts_and_rechecks(self):
         self.add("Project:Alpha port=7777 [Tier=2]")
         second_id = self.add("Project:Alpha port=7778 [Tier=2]")
@@ -159,6 +175,21 @@ class StoreRetentionTests(unittest.TestCase):
 
         self.assertEqual(1, len(self.store.get_conflicts(status="open")))
         self.assertEqual("7779", self.store.get_conflicts(status="open")[0]["value_b"])
+
+    def test_human_resolved_conflict_is_never_reopened(self):
+        self.add("Project:Alpha port=7777 [Tier=2]")
+        second_id = self.add("Project:Alpha port=7778 [Tier=2]")
+        conflict = self.store.get_conflicts(status="open")[0]
+        table = self.store._ensure_conflicts_table()
+        table.update(
+            f"id = '{conflict['id']}'",
+            {"status": "resolved", "resolved_at": 1.0},
+        )
+
+        self.store.detect_conflicts_for(second_id)
+
+        self.assertEqual([], self.store.get_conflicts(status="open"))
+        self.assertEqual(1, len(self.store.get_conflicts(status="resolved")))
 
     def test_unrelated_subjects_do_not_create_conflicts(self):
         self.add("Project:Alpha port=7777 [Tier=2]")

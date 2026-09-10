@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Post-install smoke test for the local systemd deployment.
+# Post-install smoke test for the primary Docker deployment or systemd fallback.
 
 PASS=0
 FAIL=0
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-BASE_URL="${LANCEDB_VIZ_URL:-http://127.0.0.1:7778}"
+VIZ_MODE="${LANCEDB_VIZ_MODE:-docker}"
+if [[ "$VIZ_MODE" == "systemd" ]]; then
+  BASE_URL="${LANCEDB_VIZ_URL:-http://127.0.0.1:7778}"
+else
+  BASE_URL="${LANCEDB_VIZ_URL:-http://127.0.0.1:7777}"
+fi
 
 check() {
   local name="$1"
@@ -20,7 +25,11 @@ check() {
 }
 
 echo "=== hermes-lancedb-viz smoke test ==="
-check "systemd service active" systemctl --user is-active --quiet lancedb-viz.service
+if [[ "$VIZ_MODE" == "systemd" ]]; then
+  check "systemd fallback active" systemctl --user is-active --quiet lancedb-viz.service
+else
+  check "Docker container running" sh -c "test \"\$(docker inspect --format '{{.State.Running}}' lancedb-viz 2>/dev/null)\" = true"
+fi
 check "HTTP 200 on /" sh -c "curl -sfo /dev/null -w '%{http_code}' '$BASE_URL/' | grep -q 200"
 check "stats contains memories" sh -c "curl -fsS '$BASE_URL/api/stats' | python3 -c 'import json,sys; assert json.load(sys.stdin).get(\"total_memories\", 0) > 0'"
 check "dashboard returns JSON" sh -c "curl -fsS '$BASE_URL/api/dashboard' | python3 -c 'import json,sys; json.load(sys.stdin)'"

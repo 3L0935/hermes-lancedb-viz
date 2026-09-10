@@ -509,18 +509,27 @@ class LanceDBMemoryProvider(MemoryProvider):
         if category not in VALID_CATEGORIES:
             category = "fact"
         try:
+            write_warnings = []
             mem_id = self._store.add(
                 content,
                 category=category,
                 relations=args.get("relations") if isinstance(args.get("relations"), list) else None,
+                warnings=write_warnings,
             )
-            potential_conflicts = self._store.get_conflicts(
-                status="open", memory_id=mem_id, limit=20
-            )
+            try:
+                potential_conflicts = self._store.get_conflicts(
+                    status="open", memory_id=mem_id, limit=20
+                )
+            except Exception as error:
+                potential_conflicts = []
+                warning = f"Conflict listing failed after memory write: {error}"
+                logger.warning("%s", warning)
+                write_warnings.append(warning)
             return json.dumps({
                 "success": True,
                 "memory_id": mem_id,
                 "potential_conflicts": potential_conflicts,
+                "warnings": write_warnings,
                 "message": f"Memory stored: {content[:80]}...",
             }, ensure_ascii=False)
         except Exception as e:

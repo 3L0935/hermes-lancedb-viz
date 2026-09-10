@@ -550,6 +550,15 @@ class LanceDBStore:
                 table.checkout_latest()
             except Exception:
                 pass
+            audit_fields = (
+                pa.field("resolution_type", pa.string()),
+                pa.field("resolution_note", pa.string()),
+                pa.field("resolved_by", pa.string()),
+            )
+            for field in audit_fields:
+                if field.name not in table.schema.names:
+                    table.add_columns(field)
+                    table.checkout_latest()
             return table
         except Exception:
             schema = pa.schema([
@@ -564,6 +573,9 @@ class LanceDBStore:
                 pa.field("confidence", pa.float64()),
                 pa.field("created_at", pa.float64()),
                 pa.field("resolved_at", pa.float64()),
+                pa.field("resolution_type", pa.string()),
+                pa.field("resolution_note", pa.string()),
+                pa.field("resolved_by", pa.string()),
             ])
             return self._db.create_table("memory_conflicts", schema=schema)
 
@@ -607,6 +619,11 @@ class LanceDBStore:
                 if existing:
                     if existing.get("status") == "open":
                         continue
+                    # A legacy resolved row has no resolution_type and is treated
+                    # as a human decision. Only automatic claim-change closures
+                    # may be reopened when the contradiction reappears.
+                    if existing.get("resolution_type") != "auto":
+                        continue
                     if existing["memory_a_id"] == other_id:
                         values = {
                             "value_a": other_claims[claim_key],
@@ -621,6 +638,9 @@ class LanceDBStore:
                         "status": "open",
                         "created_at": now,
                         "resolved_at": 0.0,
+                        "resolution_type": "",
+                        "resolution_note": "",
+                        "resolved_by": "",
                     })
                     table.update(f"id = '{existing['id']}'", values)
                     existing.update(values)
@@ -638,6 +658,9 @@ class LanceDBStore:
                     "confidence": 1.0,
                     "created_at": now,
                     "resolved_at": 0.0,
+                    "resolution_type": "",
+                    "resolution_note": "",
+                    "resolved_by": "",
                 }
                 created.append(row)
                 to_insert.append(row)
@@ -671,7 +694,13 @@ class LanceDBStore:
             table = self._ensure_conflicts_table()
             table.update(
                 f"(memory_a_id = '{memory_id}' OR memory_b_id = '{memory_id}') AND status = 'open'",
-                {"status": "resolved", "resolved_at": time.time()},
+                {
+                    "status": "resolved",
+                    "resolved_at": time.time(),
+                    "resolution_type": "auto",
+                    "resolution_note": "claims changed",
+                    "resolved_by": "system",
+                },
             )
         except Exception as error:
             logger.warning("Failed to close conflicts for %s: %s", memory_id, error)
@@ -736,7 +765,8 @@ class LanceDBStore:
             tags: list[str] | None = None,
             quality: float | None = None,
             type_: str | None = None,
-            relations: list[dict] | None = None) -> str:
+            relations: list[dict] | None = None,
+            warnings: list[str] | None = None) -> str:
         """Add a new memory. Extracts entities, embeds, links."""
         self._fresh()
         from uuid import uuid4
@@ -796,7 +826,13 @@ class LanceDBStore:
         )
 
         # Conservative local contradiction check. This never mutates memories.
-        self.detect_conflicts_for(mem_id)
+        try:
+            self.detect_conflicts_for(mem_id)
+        except Exception as error:
+            warning = f"Conflict detection failed after memory write: {error}"
+            logger.warning("%s", warning)
+            if warnings is not None:
+                warnings.append(warning)
 
         self._update_db_size()
 
