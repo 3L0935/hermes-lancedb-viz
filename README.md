@@ -102,13 +102,14 @@ hermes tools | grep lancedb
 
 ### 4. Deploy the visualizer
 
+The primary UI is the Docker container `lancedb-viz` on port 7777, launched by the Hermes Hub compose file (`~/github/hermes-hub/services/lancedb-viz/`) and bound to the files deployed by `deploy-local.sh` (see docs/setup.md). It starts automatically with Docker.
+
 ```bash
 ./scripts/deploy-local.sh --dry-run
 ./scripts/deploy-local.sh
-systemctl --user enable lancedb-viz.service
 ```
 
-Dashboard: `http://localhost:7778`
+Dashboard: `http://localhost:7777`
 
 For the full setup guide, see [docs/setup.md](docs/setup.md).
 

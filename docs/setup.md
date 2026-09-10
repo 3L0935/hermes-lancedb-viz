@@ -36,21 +36,13 @@ From the repository root:
 ```bash
 ./scripts/deploy-local.sh --dry-run
 ./scripts/deploy-local.sh
-systemctl --user enable lancedb-viz.service
 ```
 
-The deployment synchronizes:
+The deploy synchronizes the canonical and runtime plugin copies plus `~/.hermes/lancedb-viz/` (server.py + static). Those deployed files are exactly what the Docker container `lancedb-viz` bind-mounts on port 7777, so the container serves the repository code after any restart. After modifying `server.py`, restart the container once (`docker restart lancedb-viz`); static-only changes need no restart.
 
-```text
-plugin/       -> ~/.hermes/plugins/lancedb/
-plugin/       -> ~/.hermes/hermes-agent/plugins/memory/lancedb/
-server/static -> ~/.hermes/lancedb-viz/
-systemd unit  -> ~/.config/systemd/user/lancedb-viz.service
-```
+Dashboard (Docker via Hermes Hub, primary): `http://localhost:7777`
 
-The canonical user plugin survives Hermes source-tree updates. The runtime copy is retained for bundled-first compatibility.
-
-## 4. Migrate an existing database
+A user systemd unit (`lancedb-viz.service`, port 7778) is installed as an optional standalone fallback and left disabled. To run the fallback instead of Docker, `systemctl --user enable --now lancedb-viz.service`.
 
 Always preview first. Before applying, create a complete filesystem backup while writers are quiet.
 
