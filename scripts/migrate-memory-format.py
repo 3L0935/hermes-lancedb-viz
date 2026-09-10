@@ -68,11 +68,20 @@ def prepare_working_copy(source_db: Path, work_root: Path) -> dict[str, Any]:
     copied = tree_digest(destination)
     if source_before != source_after or copied != source_after:
         raise RuntimeError("source changed during copy or copy verification failed")
+    # A digest match does not prove the copy holds data: a killed earlier run can
+    # leave a source whose data directory was emptied while manifests survived.
+    # Refuse to work from a copy with zero rows instead of migrating an empty table.
+    row_count = len(audit.read_rows(destination))
+    if row_count <= 0:
+        raise RuntimeError(
+            "source database contains zero readable rows in 'memories' — refusing to migrate an empty copy"
+        )
     return {
         "source_db": str(source),
         "working_copy": str(destination),
         "source_digest": source_after,
         "copy_digest": copied,
+        "copy_rows": row_count,
         "copy_verified": True,
     }
 
