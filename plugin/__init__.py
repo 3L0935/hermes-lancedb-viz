@@ -29,6 +29,24 @@ def _write_error(error: Exception) -> str:
         }, ensure_ascii=False, default=str)
     return tool_error(str(error))
 
+
+def _normalized_write_fields(
+    memory: MemoryWrite,
+    *,
+    include_relations: bool = True,
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "domain": memory.domain,
+        "subject": memory.subject,
+        "facts": list(memory.facts),
+        "tier": memory.tier,
+        "category": memory.category,
+        "write_mode": memory.write_mode,
+    }
+    if include_relations:
+        fields["relations"] = [relation.to_dict() for relation in memory.relations]
+    return fields
+
 # ---------------------------------------------------------------------------
 # Tool schemas
 # ---------------------------------------------------------------------------
@@ -148,7 +166,6 @@ _GRAPH_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {},
-        "required": [],
     },
 }
 
@@ -260,7 +277,6 @@ _LIST_SCHEMA = {
                 "description": "Pagination offset (default: 0).",
             },
         },
-        "required": [],
     },
 }
 
@@ -307,7 +323,6 @@ _CONFLICTS_SCHEMA = {
                 "description": "Actor recorded in the audit trail (default: user).",
             },
         },
-        "required": [],
     },
 }
 
@@ -409,7 +424,7 @@ class LanceDBMemoryProvider(MemoryProvider):
             f"  No approximate search — use when you need every entry of a category.\n"
             f"Use lancedb_get to get full detail on a single memory by ID (includes relations).\n"
             f"Use lancedb_add to store new facts as they come up.\n"
-            f"Use lancedb_update to edit an existing memory in-place (content, category, tags, quality) — prefer over delete+recreate.\n"
+            f"Use lancedb_update to edit an existing memory in-place; it preserves the ID and audit history.\n"
             f"Use lancedb_graph to explore memory connections.\n"
         )
 
@@ -513,6 +528,8 @@ class LanceDBMemoryProvider(MemoryProvider):
                 logger.warning("Conflict listing failed after memory write: %s", error)
                 result.setdefault("warnings", []).append(warning)
             result["potential_conflicts"] = potential_conflicts
+            result["conflicts"] = potential_conflicts
+            result["normalized_fields"] = _normalized_write_fields(memory)
             result["message"] = f"Memory {result['status']}: {result['canonical_content'][:80]}..."
             return json.dumps(result, ensure_ascii=False, default=str)
         except Exception as error:
@@ -571,6 +588,24 @@ class LanceDBMemoryProvider(MemoryProvider):
                 if field in args:
                     patch_data[field] = args[field]
             result = self._store.update_memory(MemoryPatch.from_mapping(patch_data))
+            try:
+                conflicts = self._store.get_conflicts(
+                    status="open", memory_id=result.get("memory_id", ""), limit=20
+                )
+            except Exception as error:
+                conflicts = []
+                result.setdefault("warnings", []).append({
+                    "code": "conflict_listing_failed",
+                    "field": "conflicts",
+                    "message": "memory result is valid but conflict listing failed",
+                    "received": str(error),
+                    "expected": "readable conflict registry",
+                })
+            result["conflicts"] = conflicts
+            result["normalized_fields"] = _normalized_write_fields(
+                replacement,
+                include_relations="relations" in args,
+            )
             result["updated_fields"] = [
                 field for field in args if field != "memory_id"
             ]

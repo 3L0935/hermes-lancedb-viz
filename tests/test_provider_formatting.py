@@ -76,6 +76,18 @@ class ProviderFormattingTests(unittest.TestCase):
         self.assertEqual("integer", add["properties"]["tier"]["type"])
         self.assertEqual(12, add["properties"]["facts"]["maxItems"])
 
+    def test_no_tool_schema_uses_an_empty_required_array_or_preferred_wording(self):
+        schemas = self.provider.get_tool_schemas()
+
+        self.assertFalse(any(
+            schema["parameters"].get("required") == []
+            for schema in schemas
+        ))
+        self.assertNotIn(
+            "preferred",
+            " ".join(schema.get("description", "") for schema in schemas).casefold(),
+        )
+
     def test_add_handler_uses_same_contract_and_echoes_canonical_content(self):
         payload = json.loads(self.provider.handle_tool_call(
             "lancedb_add", self.valid_write()
@@ -89,6 +101,16 @@ class ProviderFormattingTests(unittest.TestCase):
             "Project:Alpha port=7777 [Tier=2]",
             payload["canonical_content"],
         )
+        self.assertEqual({
+            "domain": "Project",
+            "subject": "Alpha",
+            "facts": ["port=7777"],
+            "tier": 2,
+            "category": "project",
+            "relations": [],
+            "write_mode": "create",
+        }, payload["normalized_fields"])
+        self.assertEqual([], payload["conflicts"])
 
     def test_invalid_category_returns_machine_readable_error_without_store_call(self):
         payload = json.loads(self.provider.handle_tool_call(
@@ -134,6 +156,8 @@ class ProviderFormattingTests(unittest.TestCase):
             "Project:Alpha port=7777 [Tier=2]",
             payload["replaced_content"],
         )
+        self.assertEqual("port=7778", payload["normalized_fields"]["facts"][0])
+        self.assertEqual([], payload["conflicts"])
 
     def test_update_handler_enforces_complete_structured_shape(self):
         payload = json.loads(self.provider.handle_tool_call(
