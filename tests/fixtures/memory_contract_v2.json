@@ -1,0 +1,66 @@
+{
+  "contract_version": 2,
+  "baseline": {
+    "rows": 450,
+    "missing_valid_wrapper": 18,
+    "missing_or_invalid_tier": 5,
+    "multiple_tier_markers": 7,
+    "duplicate_subject_prefix": 2,
+    "content_over_500_chars": 88
+  },
+  "valid": [
+    {
+      "name": "dense_claims",
+      "request": {
+        "domain": "Project",
+        "subject": "Alpha",
+        "facts": ["path=/tmp/Alpha", "port=7777"],
+        "tier": 2,
+        "category": "project"
+      }
+    },
+    {
+      "name": "dense_prose",
+      "request": {
+        "domain": "Correction",
+        "subject": "MVCC",
+        "facts": ["Refresh the table handle before reading a new snapshot"],
+        "tier": 1,
+        "category": "correction"
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "missing_wrapper",
+      "content": "subjectless prose [Tier=2]",
+      "code": "missing_subject_prefix"
+    },
+    {
+      "name": "invalid_tier",
+      "content": "Project:Alpha state=active [Tier=9]",
+      "code": "invalid_tier"
+    },
+    {
+      "name": "multiple_tiers",
+      "content": "Project:Alpha state=active [Tier=2] [Tier=2]",
+      "code": "multiple_tier_markers"
+    },
+    {
+      "name": "duplicate_wrapper",
+      "content": "Project:Alpha Project:Alpha state=active [Tier=2]",
+      "code": "duplicate_subject_prefix"
+    },
+    {
+      "name": "multiline_fact",
+      "request": {
+        "domain": "Project",
+        "subject": "Alpha",
+        "facts": ["first line\nsecond line"],
+        "tier": 2,
+        "category": "project"
+      },
+      "code": "multiline_fact"
+    }
+  ]
+}

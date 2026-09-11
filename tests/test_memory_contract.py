@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 import unittest
 
 from plugin.memory_contract import (
@@ -15,6 +17,29 @@ from plugin.memory_contract import (
 
 
 class MemoryContractTests(unittest.TestCase):
+    def test_versioned_fixture_freezes_observed_baseline_and_examples(self):
+        fixture_path = Path(__file__).parent / "fixtures" / "memory_contract_v2.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(2, fixture["contract_version"])
+        self.assertEqual({
+            "rows": 450,
+            "missing_valid_wrapper": 18,
+            "missing_or_invalid_tier": 5,
+            "multiple_tier_markers": 7,
+            "duplicate_subject_prefix": 2,
+            "content_over_500_chars": 88,
+        }, fixture["baseline"])
+        for case in fixture["valid"]:
+            MemoryWrite.from_mapping(case["request"])
+        for case in fixture["invalid"]:
+            with self.assertRaises(MemoryContractError) as caught:
+                if "request" in case:
+                    MemoryWrite.from_mapping(case["request"])
+                else:
+                    canonicalize_content(case["content"])
+            self.assertEqual(case["code"], caught.exception.issue.code, case["name"])
+
     def test_dense_fact_within_measured_cap_is_valid(self):
         dense_fact = "root_cause=MVCC " + "dense correction detail " * 20
 
@@ -202,6 +227,24 @@ class MemoryContractTests(unittest.TestCase):
         })
 
         self.assertEqual(memory_fingerprint(first), memory_fingerprint(second))
+
+    def test_fingerprint_preserves_case_sensitive_claim_values(self):
+        upper = MemoryWrite.from_mapping({
+            "domain": "Project",
+            "subject": "Alpha",
+            "facts": ["path=/tmp/Alpha"],
+            "tier": 2,
+            "category": "project",
+        })
+        lower = MemoryWrite.from_mapping({
+            "domain": "Project",
+            "subject": "Alpha",
+            "facts": ["PATH = /tmp/alpha"],
+            "tier": 2,
+            "category": "project",
+        })
+
+        self.assertNotEqual(memory_fingerprint(upper), memory_fingerprint(lower))
 
     def test_write_mode_defaults_to_create_and_rejects_unknown_values(self):
         base = {

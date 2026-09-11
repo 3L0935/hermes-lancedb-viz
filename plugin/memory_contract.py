@@ -3,25 +3,25 @@
 This module deliberately imports neither LanceDB nor Ollama.  It is the shared
 contract for agent tools, cron jobs, migrations, and the persistent store.
 
-Density limits were selected from a read-only Arrow scan of the live table on
-2026-09-10 (451 rows; 422 structurally canonical rows).  Existing body lengths
-were p50=215, p75=350, p90=698, p95=952, p99=1342, max=1650 characters.
+Density limits were revalidated with a read-only projected Arrow scan on
+2026-09-11 (465 rows; 446 rows with a valid outer wrapper). Existing body
+lengths were p50=220, p75=371, p90=827, p95=995, p99=1408, max=2266.
 
 Treating each existing body as one fact, the candidate per-fact caps retained:
 
     cap       kept       rejected
-    240       248/422     174
-    480       353/422      69
-    768       385/422      37
-    1000      405/422      17   (96.0%; selected)
-    1200      412/422      10
-    1500      420/422       2
+    240       252/446     194   (56.5%; rejected as too destructive)
+    480       363/446      83
+    768       398/446      48
+    1000      425/446      21   (95.3%; selected)
+    1200      431/446      15
+    1500      442/446       4
 
 The 2,000-character aggregate cap preserves every structurally canonical row
 when a genuinely multi-part body is represented by more than one fact.  The
-12-fact cap leaves headroom above the measured p99 explicit-claim count of 8;
-421/422 canonical rows had at most 10 explicit key=value claims.  Migration
-must classify longer legacy rows for review, never fragment them automatically.
+12-fact cap leaves headroom above the measured p99 explicit-claim count of 9.
+Migration must classify longer legacy rows for review, never fragment them
+automatically. The scan left the LanceDB table version unchanged at 110000.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ MAX_TOTAL_FACT_CHARS = 2000
 MAX_RELATIONS = 20
 MAX_TAGS = 20
 MAX_TAG_CHARS = 80
+CONTRACT_VERSION = 2
 
 VALID_CATEGORIES = frozenset({
     "user_pref", "project", "tech", "correction", "fact",
@@ -572,7 +573,10 @@ def memory_fingerprint(memory: MemoryWrite) -> str:
         key=lambda relation: json.dumps(relation, sort_keys=True, ensure_ascii=False),
     )
     payload = {
-        "content": render_content(memory).casefold(),
+        # MemoryWrite already canonicalizes wrapper spacing and claim-key case.
+        # Values remain byte-for-byte case-sensitive: paths and code identifiers
+        # such as /tmp/Alpha and /tmp/alpha are not interchangeable on Linux.
+        "content": render_content(memory),
         "category": memory.category,
         "relations": relations,
     }
