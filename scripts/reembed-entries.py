@@ -1,96 +1,114 @@
 #!/usr/bin/env python3
-"""
-Re-embed all LanceDB entries using nomic-embed-text via Ollama.
-Run after any mass content modification (reformat, correction, bulk update).
+"""Plan or explicitly apply a bounded LanceDB re-embedding pass."""
 
-Usage:
-    ~/.hermes/hermes-agent/venv/bin/python3 reembed-entries.py [--dry-run]
+from __future__ import annotations
 
-What it does:
-    - Reads every entry in ~/.hermes/lancedb
-    - Sends content to local Ollama nomic-embed-text (batch size 10)
-    - Updates vector column in-place (keeps all other fields intact)
-
-Why this exists:
-    Changing 'content' doesn't auto-update vectors. The graph cosine similarity
-    becomes stale. Run this after any content migration to restore proper links.
-"""
-
+import argparse
+import os
+from pathlib import Path
+import re
 import sys
-import lancedb
-import requests
 
-DB_PATH = os.environ.get('HERMES_HOME', str(Path.home() / '.hermes' / 'lancedb'))
-OLLAMA_URL = os.environ.get('OLLAMA_HOST', 'http://localhost:11434') + '/api/embed'
-MODEL = 'nomic-embed-text'
+import numpy as np
+
+
+MODEL = os.environ.get("LANCE_EMBED_MODEL", "nomic-embed-text")
+OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/") + "/api/embed"
 BATCH_SIZE = 10
+_MEMORY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
-def main():
-    dry_run = '--dry-run' in sys.argv
+def default_db_path() -> Path:
+    hermes_root = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+    return hermes_root / "lancedb"
 
-    # ── Check Ollama ───────────────────────────────────────────
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--db-path", type=Path, default=default_db_path())
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="Read and report only (default).")
+    mode.add_argument("--apply", action="store_true", help="Explicitly update vectors in the selected database.")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
+    return parser
+
+
+def read_entries(db_path: Path):
+    import lancedb
+
+    db = lancedb.connect(str(db_path.expanduser().resolve()))
+    table = db.open_table("memories")
+    rows = table.to_arrow().select(["id", "content"]).to_pylist()
+    return table, rows
+
+
+def _sql_literal(value: str) -> str:
+    if not _MEMORY_ID_RE.fullmatch(value):
+        raise ValueError(f"invalid memory ID: {value!r}")
+    return "'" + value.replace("'", "''") + "'"
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.batch_size < 1 or args.batch_size > 100:
+        print("ERROR: --batch-size must be between 1 and 100", file=sys.stderr)
+        return 2
+
     try:
-        r = requests.get('http://localhost:11434/api/tags', timeout=5)
-        models = [m['name'] for m in r.json().get('models', [])]
-    except Exception as e:
-        print(f"ERROR: Ollama not reachable at {OLLAMA_URL}: {e}")
-        sys.exit(1)
+        table, entries = read_entries(args.db_path)
+    except Exception as error:
+        print(f"ERROR: cannot read {args.db_path}: {error}", file=sys.stderr)
+        return 2
 
-    if not any('nomic' in m for m in models):
-        print(f"Pulling {MODEL} (first time)...")
-        requests.post('http://localhost:11434/api/pull',
-                      json={'name': MODEL}, timeout=300)
+    print(f"Found {len(entries)} entries in {args.db_path}.")
+    if not args.apply:
+        print("--dry-run mode: no Ollama request and no database write.")
+        for entry in entries[:3]:
+            print(f"  Would embed: {str(entry['id'])[:16]}...")
+        print(f"Would embed {len(entries)} entries total. Use --apply only after a verified backup.")
+        return 0
 
-    # ── Read DB ────────────────────────────────────────────────
-    print(f"Connecting to {DB_PATH}...")
-    db = lancedb.connect(DB_PATH)
-    tbl = db.open_table('memories')
-    data = tbl.to_arrow().to_pydict()
-    entries = [{k: data[k][i] for k in data} for i in range(len(data['id']))]
-    total = len(entries)
-    print(f"Found {total} entries.\n")
+    import httpx
 
-    if dry_run:
-        print("--dry-run mode: no changes will be made.")
-        for e in entries[:3]:
-            print(f"  Would embed: {e['id'][:16]}... -> {e['content'][:60]}...")
-        print(f"\nWould embed {total} entries total. Run without --dry-run to apply.")
-        return
-
-    # ── Embed + update ─────────────────────────────────────────
-    import re
     updated = 0
-    for start in range(0, total, BATCH_SIZE):
-        batch = entries[start:start + BATCH_SIZE]
-        # Strip ::relations:: lines before embedding (vector noise)
-        texts = [re.sub(r'\n::relations::.*', '', e['content']).strip() or e['content'] for e in batch]
-        ids = [e['id'] for e in batch]
-
-        resp = requests.post(OLLAMA_URL, json={
-            'model': MODEL,
-            'input': texts,
-            'keep_alive': '30s'
-        }, timeout=60)
-
-        if resp.status_code != 200:
-            print(f"  ERROR batch {start}: {resp.status_code} {resp.text[:200]}")
+    failed = 0
+    for start in range(0, len(entries), args.batch_size):
+        batch = entries[start:start + args.batch_size]
+        texts = [
+            re.sub(r"\n::relations::.*", "", str(entry["content"])).strip()
+            or str(entry["content"])
+            for entry in batch
+        ]
+        try:
+            response = httpx.post(
+                OLLAMA_URL,
+                json={"model": MODEL, "input": texts, "keep_alive": "30s"},
+                timeout=60,
+            )
+            response.raise_for_status()
+            embeddings = response.json().get("embeddings", [])
+            if len(embeddings) != len(batch):
+                raise ValueError("embedding response cardinality mismatch")
+            vectors = [np.asarray(vector, dtype=np.float32) for vector in embeddings]
+            if any(vector.shape != (768,) or not np.isfinite(vector).all() for vector in vectors):
+                raise ValueError("embedding response contains invalid vectors")
+        except Exception as error:
+            failed += len(batch)
+            print(f"ERROR batch {start}: {error}", file=sys.stderr)
             continue
 
-        embeddings = resp.json()['embeddings']
-
-        for i, (eid, emb) in enumerate(zip(ids, embeddings)):
-            tbl.update(
-                where=f"id = '{eid}'",
-                values={"vector": emb}
+        for entry, vector in zip(batch, vectors):
+            memory_id = str(entry["id"])
+            table.update(
+                where=f"id = {_sql_literal(memory_id)}",
+                values={"vector": vector.tolist()},
             )
             updated += 1
+        print(f"[{min(start + args.batch_size, len(entries))}/{len(entries)}] re-embedded")
 
-        done = min(start + BATCH_SIZE, total)
-        print(f"  [{done}/{total}] re-embedded")
-
-    print(f"\nDone! {updated}/{total} entries re-embedded with {MODEL}.")
+    print(f"Done: {updated} updated, {failed} failed with {MODEL}.")
+    return 1 if failed else 0
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    raise SystemExit(main())
