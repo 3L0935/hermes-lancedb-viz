@@ -313,6 +313,21 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertEqual([], calls)
         self.assertEqual(version_before, self.store._table.version)
 
+    def test_category_only_update_accepts_memory_with_two_long_facts(self):
+        memory = self.structured(
+            subject="LongFacts",
+            facts=["a" * 600, "b" * 600],
+        )
+        memory_id = self.store.add_memory(memory)["memory_id"]
+
+        result = self.store.update_memory(MemoryPatch.from_mapping({
+            "memory_id": memory_id,
+            "category": "insight",
+        }))
+
+        self.assertEqual("updated", result["status"])
+        self.assertEqual("insight", self.store._get_by_id_raw(memory_id)["category"])
+
     def test_quality_and_access_updates_do_not_reembed(self):
         memory_id = self.store.add_memory(self.structured())["memory_id"]
         original_vector = np.array(self.store._get_by_id_raw(memory_id)["vector"])

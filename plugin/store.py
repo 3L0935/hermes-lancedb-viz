@@ -1666,23 +1666,36 @@ class LanceDBStore:
                 if patch.relations is not None
                 else self._relations_for_contract(stored_relations)
             )
-            candidate = MemoryWrite.from_mapping({
-                "domain": patch.domain if patch.domain is not None else parts.domain,
-                "subject": patch.subject if patch.subject is not None else parts.subject,
-                "facts": list(patch.facts) if patch.facts is not None else [parts.body],
-                "tier": patch.tier if patch.tier is not None else parts.tier,
-                "category": patch.category if patch.category is not None else existing_category,
-                "relations": [
-                    relation.to_dict() if hasattr(relation, "to_dict") else relation
-                    for relation in candidate_relations
-                ],
-            })
-            canonical_content = render_content(candidate)
             existing_memory = parse_content(
                 replaced_content,
                 category=existing_category,
-                relations=[relation.to_dict() for relation in candidate.relations],
+                relations=[
+                    relation.to_dict() if hasattr(relation, "to_dict") else relation
+                    for relation in candidate_relations
+                ],
             )
+            if not content_fields_changed:
+                candidate = MemoryWrite(
+                    domain=existing_memory.domain,
+                    subject=existing_memory.subject,
+                    facts=existing_memory.facts,
+                    tier=existing_memory.tier,
+                    category=patch.category or existing_memory.category,
+                    relations=existing_memory.relations,
+                )
+            else:
+                candidate = MemoryWrite.from_mapping({
+                    "domain": patch.domain if patch.domain is not None else parts.domain,
+                    "subject": patch.subject if patch.subject is not None else parts.subject,
+                    "facts": list(patch.facts) if patch.facts is not None else list(existing_memory.facts),
+                    "tier": patch.tier if patch.tier is not None else parts.tier,
+                    "category": patch.category if patch.category is not None else existing_category,
+                    "relations": [
+                        relation.to_dict() if hasattr(relation, "to_dict") else relation
+                        for relation in candidate_relations
+                    ],
+                })
+            canonical_content = render_content(candidate)
             semantic_unchanged = (
                 canonical_content == render_content(existing_memory)
                 and self._relation_lists_match(candidate.relations, stored_relations)

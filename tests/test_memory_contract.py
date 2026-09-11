@@ -12,6 +12,7 @@ from plugin.memory_contract import (
     canonicalize_content,
     contract_warnings,
     memory_fingerprint,
+    parse_content,
     render_content,
 )
 
@@ -79,6 +80,29 @@ class MemoryContractTests(unittest.TestCase):
 
         self.assertEqual(canonical, canonicalize_content(canonical, category="project"))
         self.assertEqual("Project:Alpha port=7777 owner=elo. [Tier=2]", canonical)
+
+    def test_two_long_facts_survive_canonical_round_trip(self):
+        memory = MemoryWrite.from_mapping({
+            "domain": "Project",
+            "subject": "LongFacts",
+            "facts": ["a" * 600, "b" * 600],
+            "tier": 2,
+            "category": "project",
+        })
+
+        rendered = render_content(memory)
+        reparsed = parse_content(rendered, category="project")
+
+        self.assertEqual(memory.facts, reparsed.facts)
+        self.assertEqual(rendered, render_content(reparsed))
+
+    def test_unmarked_legacy_body_uses_persisted_content_cap(self):
+        rendered = f"Project:LegacyLong {'x' * 1200} [Tier=2]"
+
+        reparsed = parse_content(rendered, category="project")
+
+        self.assertEqual(("x" * 1200,), reparsed.facts)
+        self.assertEqual(rendered, render_content(reparsed))
 
     def test_missing_wrapper_is_rejected(self):
         self.assert_contract_error(

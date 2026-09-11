@@ -62,6 +62,8 @@ _GENERIC_SUBJECTS = frozenset({
 })
 _FORBIDDEN_LABEL_RE = re.compile(r"[:\[\]\r\n]")
 _TIER_MARKER_RE = re.compile(r"\[\s*tier\s*=\s*([^\]]*)\]", re.IGNORECASE)
+_FACT_MARKER_RE = re.compile(r"::\s*fact\s*::", re.IGNORECASE)
+_FACT_SEPARATOR = " ::fact:: "
 _RELATION_MARKER_RE = re.compile(r"::\s*relations\s*::", re.IGNORECASE)
 _CLAIM_KEY_RE = re.compile(
     r"(?<![\w.-])([A-Za-z][A-Za-z0-9_.-]*)\s*=\s*"
@@ -182,6 +184,14 @@ def _normalize_fact(
             "relations belong in the relations field, not inside a fact",
             value,
             "fact text without ::relations::",
+        )
+    if _FACT_MARKER_RE.search(normalized):
+        _raise(
+            "nested_fact_marker",
+            field,
+            "fact boundaries are rendered by the contract, not inside a fact",
+            value,
+            "fact text without ::fact::",
         )
 
     expected_prefix = f"{domain}:{subject}"
@@ -475,13 +485,7 @@ class MemoryPatch:
 
 
 def render_content(memory: MemoryWrite) -> str:
-    rendered_facts = []
-    for index, fact in enumerate(memory.facts):
-        rendered = fact
-        if index < len(memory.facts) - 1 and not rendered.endswith((".", "!", "?", ";")):
-            rendered += "."
-        rendered_facts.append(rendered)
-    body = " ".join(rendered_facts)
+    body = _FACT_SEPARATOR.join(memory.facts)
     return f"{memory.domain}:{memory.subject} {body} [Tier={memory.tier}]"
 
 
@@ -511,13 +515,17 @@ def parse_content_parts(content: Any) -> MemoryContentParts:
 
     domain = _normalize_label(prefix.group("domain"), field="domain", max_chars=MAX_DOMAIN_CHARS)
     subject = _normalize_label(prefix.group("subject"), field="subject", max_chars=MAX_SUBJECT_CHARS)
-    body = _normalize_fact(
-        body,
-        0,
-        domain=domain,
-        subject=subject,
-        enforce_density=False,
+    facts = tuple(
+        _normalize_fact(
+            fact,
+            index,
+            domain=domain,
+            subject=subject,
+            enforce_density=False,
+        )
+        for index, fact in enumerate(_FACT_MARKER_RE.split(body))
     )
+    body = _FACT_SEPARATOR.join(facts)
     return MemoryContentParts(
         domain=domain,
         subject=subject,
@@ -534,11 +542,39 @@ def parse_content(
     write_mode: str = "create",
 ) -> MemoryWrite:
     parts = parse_content_parts(content)
+    facts = _FACT_MARKER_RE.split(parts.body)
+
+    if len(facts) == 1 and len(facts[0]) > MAX_FACT_CHARS:
+        if len(facts[0]) > MAX_TOTAL_FACT_CHARS:
+            _raise(
+                "facts_too_long",
+                "facts",
+                f"persisted fact body exceeds the measured {MAX_TOTAL_FACT_CHARS}-character cap",
+                len(facts[0]),
+                f"1..{MAX_TOTAL_FACT_CHARS} characters",
+            )
+        if write_mode not in VALID_WRITE_MODES:
+            _raise(
+                "invalid_write_mode",
+                "write_mode",
+                "write_mode must be create unless subject-level upsert is explicitly requested",
+                write_mode,
+                sorted(VALID_WRITE_MODES),
+            )
+        return MemoryWrite(
+            domain=parts.domain,
+            subject=parts.subject,
+            facts=(facts[0],),
+            tier=parts.tier,
+            category=_normalize_category(category),
+            relations=_normalize_relations(relations),
+            write_mode=write_mode,
+        )
 
     return MemoryWrite.from_mapping({
         "domain": parts.domain,
         "subject": parts.subject,
-        "facts": [parts.body],
+        "facts": facts,
         "tier": parts.tier,
         "category": category,
         "relations": list(relations or []),
