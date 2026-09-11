@@ -27,6 +27,10 @@ LANCEDB_PATH = HERMES_HOME / "lancedb"
 HOST = "127.0.0.1"
 PORT = 7778
 MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
+REVIEW_MAX_PROJECTED_ROWS = 2000
+REVIEW_MAX_VECTOR_ROWS = 500
+REVIEW_MAX_FINDINGS = 100
+REVIEW_NEAR_DUPLICATE_THRESHOLD = 0.95
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 _CANONICAL_ID_RE = re.compile(
@@ -1161,6 +1165,126 @@ def api_get_conflicts(params: dict) -> list:
         return {"error": str(e)}
 
 
+def _audit_module():
+    """Load the existing read-only audit implementation from the repository."""
+    import importlib.util
+
+    name = "lancedb_viz_read_only_audit"
+    if name in sys.modules:
+        return sys.modules[name]
+    server_dir = Path(__file__).resolve().parent
+    candidates = (
+        server_dir / "scripts" / "audit-memory-format.py",
+        server_dir.parent / "scripts" / "audit-memory-format.py",
+    )
+    path = next((candidate for candidate in candidates if candidate.is_file()), candidates[-1])
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _near_duplicate_findings(rows: list[dict]) -> list[dict]:
+    """Return bounded pairwise cosine findings from an already bounded projection."""
+    import numpy as np
+
+    candidates = []
+    for row in rows:
+        vector = row.get("vector")
+        if not isinstance(vector, (list, np.ndarray)):
+            continue
+        array = np.asarray(vector, dtype=np.float32)
+        norm = float(np.linalg.norm(array))
+        if array.ndim != 1 or len(array) < 2 or norm < 0.001:
+            continue
+        candidates.append((row, array / norm))
+
+    findings = []
+    for left_index, (left, left_vector) in enumerate(candidates):
+        for right, right_vector in candidates[left_index + 1:]:
+            score = float(np.dot(left_vector, right_vector))
+            if score < REVIEW_NEAR_DUPLICATE_THRESHOLD:
+                continue
+            findings.append({
+                "reason": "near_duplicate",
+                "memory_id": str(left.get("id") or ""),
+                "related_memory_id": str(right.get("id") or ""),
+                "similarity": round(score, 4),
+                "message": "High semantic proximity; review both records before any manual decision.",
+            })
+            if len(findings) >= REVIEW_MAX_FINDINGS:
+                return findings
+    return findings
+
+
+def api_get_review_inbox() -> dict:
+    """Build a bounded, read-only review inbox only when explicitly requested."""
+    try:
+        store = _get_store()
+        format_rows = (
+            store._table.search()
+            .select(["id", "content", "category"])
+            .limit(REVIEW_MAX_PROJECTED_ROWS)
+            .to_list()
+        )
+        audit = _audit_module().audit_rows(format_rows)
+        findings = []
+        for finding in audit.get("findings", []):
+            findings.append({
+                "reason": "format",
+                "memory_id": finding.get("memory_id", ""),
+                "status": finding.get("status", "invalid"),
+                "detail": finding.get("error") or finding.get("warnings") or [],
+                "canonical_content": finding.get("canonical_content"),
+                "message": "Stored format differs from the current contract; review before editing.",
+            })
+
+        for conflict in store.get_conflicts(status="open", limit=REVIEW_MAX_FINDINGS):
+            findings.append({
+                "reason": "contradiction",
+                "memory_id": conflict.get("memory_a_id", ""),
+                "related_memory_id": conflict.get("memory_b_id", ""),
+                "claim_key": conflict.get("claim_key", ""),
+                "message": "Two claims differ; neither is assumed false until a human resolves them.",
+            })
+
+        for edge in store.get_typed_edges(include_unresolved=True):
+            if edge.get("to"):
+                continue
+            findings.append({
+                "reason": "broken_reference",
+                "memory_id": edge.get("from", ""),
+                "relation_type": edge.get("relation_type", ""),
+                "target_label": edge.get("target_label", ""),
+                "message": "Declared relation target could not be resolved to a memory ID.",
+            })
+
+        vector_rows = (
+            store._table.search()
+            .select(["id", "content", "category", "vector"])
+            .limit(REVIEW_MAX_VECTOR_ROWS)
+            .to_list()
+        )
+        findings.extend(_near_duplicate_findings(vector_rows))
+        findings = findings[:REVIEW_MAX_FINDINGS]
+        return {
+            "read_only": True,
+            "age_policy": "Older does not mean false; age is not a review reason.",
+            "findings": findings,
+            "count": len(findings),
+            "audit_summary": audit.get("summary", {}),
+            "budgets": {
+                "projected_rows": REVIEW_MAX_PROJECTED_ROWS,
+                "vector_rows": REVIEW_MAX_VECTOR_ROWS,
+                "pair_comparisons": REVIEW_MAX_VECTOR_ROWS * (REVIEW_MAX_VECTOR_ROWS - 1) // 2,
+                "response_findings": REVIEW_MAX_FINDINGS,
+            },
+        }
+    except Exception as error:
+        return {"error": str(error), "read_only": True, "findings": []}
+
+
 def api_resolve_conflict(conflict_id: str, data: dict) -> dict:
     """POST /api/conflicts/:id/resolve — resolve with an audit trail."""
     resolution_note = str(data.get("resolution_note") or "").strip()
@@ -1508,6 +1632,8 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/conflicts":
             p = {k: v[0] for k, v in params.items()}
             self._send_json(api_get_conflicts(p))
+        elif path == "/api/review":
+            self._send_json(api_get_review_inbox())
         elif path == "/api/dashboard":
             self._send_json(api_get_dashboard())
         elif path == "/api/refresh":

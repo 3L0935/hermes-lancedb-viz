@@ -369,6 +369,45 @@ async function loadConflicts() {
   }
 }
 
+// Review inbox — deliberately invoked only by the page button.
+const reviewReasonLabels = {
+  format: 'Format', contradiction: 'Contradiction',
+  broken_reference: 'Broken reference', near_duplicate: 'Near duplicate',
+};
+
+async function loadReviewInbox() {
+  const button = document.getElementById('review-scan');
+  const container = document.getElementById('review-container');
+  button.disabled = true;
+  button.textContent = 'Scanning projected fields...';
+  container.innerHTML = '<div class="loading"><div class="spinner"></div><div>Read-only scan in progress</div></div>';
+  try {
+    const response = await fetch(API + '/review');
+    const data = await response.json();
+    if (data.error) throw new Error(data.error);
+    const findings = (data.findings || []).slice(0, 100);
+    setEl('review-count', findings.length + ' reasons · read only');
+    container.innerHTML = findings.length ? findings.map(finding => {
+      const reason = reviewReasonLabels[finding.reason] || 'Review';
+      const related = finding.related_memory_id ? ' · related ' + finding.related_memory_id : '';
+      const target = finding.target_label ? ' · target ' + finding.target_label : '';
+      const score = finding.similarity != null ? ' · cosine ' + Number(finding.similarity).toFixed(3) : '';
+      const open = finding.memory_id ? ' onclick="showMemoryDetail(\'' + escapeJsString(finding.memory_id) + '\')"' : '';
+      return '<button class="review-card review-' + escapeHtmlAttr(finding.reason) + '"' + open + '>' +
+        '<span class="review-reason">' + escapeHtml(reason) + '</span>' +
+        '<span class="review-id">' + escapeHtml((finding.memory_id || 'unknown') + related + target + score) + '</span>' +
+        '<span class="review-message">' + escapeHtml(finding.message || '') + '</span>' +
+      '</button>';
+    }).join('') : '<div class="empty-state">No review reason found within the declared scan budgets.</div>';
+  } catch(e) {
+    container.innerHTML = '<div class="error-state">Review scan failed: ' + escapeHtml(e.message) + '</div>';
+    setEl('review-count', 'Scan failed');
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Run read-only scan';
+  }
+}
+
 // Embeddings (UMAP projection)
 // ═══════════════════════════════════════════════
 

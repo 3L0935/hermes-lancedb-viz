@@ -66,6 +66,49 @@ class FakeUpdateStore:
         }
 
 
+class FakeQuery:
+    def __init__(self, rows, calls):
+        self.rows = rows
+        self.calls = calls
+
+    def select(self, columns):
+        self.calls.append(("select", tuple(columns)))
+        self.rows = [{key: row.get(key) for key in columns} for row in self.rows]
+        return self
+
+    def limit(self, limit):
+        self.calls.append(("limit", limit))
+        self.rows = self.rows[:limit]
+        return self
+
+    def to_list(self):
+        return self.rows
+
+
+class FakeReviewTable:
+    def __init__(self, rows, calls):
+        self.rows = rows
+        self.calls = calls
+
+    def search(self):
+        return FakeQuery(list(self.rows), self.calls)
+
+
+class FakeReviewStore:
+    def __init__(self):
+        self.calls = []
+        self._table = FakeReviewTable([
+            {"id": "aaaaaaaa-aaa", "content": "Project:Alpha state = active [Tier=2]", "category": "project", "vector": [1.0, 0.0]},
+            {"id": "bbbbbbbb-bbb", "content": "Project:Beta state=active [Tier=2]", "category": "project", "vector": [0.999, 0.01]},
+        ], self.calls)
+
+    def get_conflicts(self, status="", limit=100, memory_id=""):
+        return [{"id": CONFLICT_ID, "memory_a_id": MEMORY_ID, "memory_b_id": "bbbbbbbb-bbb", "claim_key": "port"}]
+
+    def get_typed_edges(self, include_unresolved=False):
+        return [{"from": MEMORY_ID, "to": "", "relation_type": "depends", "target_label": "Project:Missing"}]
+
+
 class VizRetentionTests(unittest.TestCase):
     def setUp(self):
         self.previous = server._store_instance
@@ -405,6 +448,32 @@ class VizRetentionTests(unittest.TestCase):
         self.assertIn("MAX_EDITOR_FACTS = 12", graph)
         self.assertIn("MAX_EDITOR_RELATIONS = 20", graph)
         self.assertIn('id="graph-canvas"', html)
+
+    def test_review_inbox_is_on_demand_projected_bounded_and_reasoned(self):
+        review_store = FakeReviewStore()
+        server._store_instance = review_store
+
+        result = server.api_get_review_inbox()
+
+        reasons = {finding["reason"] for finding in result["findings"]}
+        self.assertEqual({"format", "contradiction", "broken_reference", "near_duplicate"}, reasons)
+        self.assertLessEqual(len(result["findings"]), server.REVIEW_MAX_FINDINGS)
+        self.assertEqual(2000, result["budgets"]["projected_rows"])
+        self.assertEqual(500, result["budgets"]["vector_rows"])
+        selected = [call[1] for call in review_store.calls if call[0] == "select"]
+        self.assertIn(("id", "content", "category"), selected)
+        self.assertIn(("id", "content", "category", "vector"), selected)
+        self.assertTrue(all("created_at" not in columns for columns in selected))
+
+    def test_review_page_requires_manual_scan_and_never_labels_age_false(self):
+        html = (ROOT / "static" / "index.html").read_text()
+        app = (ROOT / "static" / "app.js").read_text()
+
+        self.assertIn('data-page="review"', html)
+        self.assertIn('id="review-scan"', html)
+        self.assertIn("async function loadReviewInbox()", app)
+        self.assertNotIn("name === 'review') loadReviewInbox()", app)
+        self.assertIn("Older does not mean false", html)
 
     def test_server_has_no_direct_table_update_and_graph_uses_memory_endpoint(self):
         source = (ROOT / "server" / "server.py").read_text()

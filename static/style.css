@@ -508,3 +508,10 @@ input[type=range] { height: 4px; accent-color: var(--indigo); cursor: pointer; }
 .edit-diff pre { min-height:70px; max-height:180px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:4px 0 0; padding:8px; border:1px solid var(--border); border-radius:6px; background:#080812; color:#cbd5e1; font:10px/1.5 'Fira Code', monospace; }
 .version-conflict { margin-top:9px; padding:8px; border:1px solid rgba(248,113,113,.45); border-radius:6px; color:#fca5a5; background:rgba(127,29,29,.16); font-size:11px; }
 .version-conflict[hidden], .edit-diff[hidden] { display:none; }
+.review-notice { margin-bottom:12px; padding:10px 12px; border-left:3px solid var(--accent); background:rgba(99,102,241,.08); color:#cbd5e1; font-size:12px; }
+.review-grid { display:grid; gap:8px; }
+.review-card { display:grid; grid-template-columns:130px minmax(0,1fr); gap:4px 12px; width:100%; padding:11px 12px; text-align:left; border:1px solid var(--border); border-radius:7px; background:rgba(10,10,22,.75); color:#e2e8f0; cursor:pointer; }
+.review-card:hover { border-color:var(--accent); }
+.review-reason { grid-row:1 / span 2; color:#a5b4fc; font:600 11px 'Fira Code', monospace; }
+.review-id { overflow:hidden; text-overflow:ellipsis; color:var(--muted); font:10px 'Fira Code', monospace; }
+.review-message { font-size:12px; }

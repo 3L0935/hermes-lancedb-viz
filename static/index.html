@@ -33,6 +33,9 @@
     <div class="nav-item" data-page="conflicts" onclick="switchPage('conflicts')">
       <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 2l6 11H2L8 2z"/><path d="M8 6v3M8 11v1"/></svg></span><span>Conflicts</span>
     </div>
+    <div class="nav-item" data-page="review" onclick="switchPage('review')">
+      <span class="nav-icon">□</span><span>Review</span>
+    </div>
     <div class="nav-item" data-page="embedding" onclick="switchPage('embedding')">
       <span class="nav-icon"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="5" r="1.5"/><circle cx="11" cy="4" r="1.5"/><circle cx="8" cy="9" r="1.5"/><circle cx="3" cy="12" r="1.5"/><circle cx="12" cy="11" r="1.5"/></svg></span><span>Embeddings</span>
     </div>
@@ -157,6 +160,18 @@
             <label>Status <select id="conflict-status" onchange="loadConflicts()"><option value="open">Open</option><option value="resolved">Resolved</option><option value="">All</option></select></label>
           </div>
           <div id="conflict-container"></div>
+        </div>
+      </div>
+
+      <!-- Read-only review inbox: scans only after explicit request. -->
+      <div id="page-review" class="page">
+        <div class="page-inner">
+          <div class="section-header"><h2>Review Inbox</h2><span class="sub" id="review-count">Not scanned</span></div>
+          <div class="review-notice">Older does not mean false. Age is never used as a review reason, and this page never cleans automatically.</div>
+          <div class="filter-bar">
+            <button id="review-scan" class="btn-neon btn-focus" onclick="loadReviewInbox()">Run read-only scan</button>
+          </div>
+          <div id="review-container" class="review-grid"><div class="empty-state">No background scan is running.</div></div>
         </div>
       </div>
 
