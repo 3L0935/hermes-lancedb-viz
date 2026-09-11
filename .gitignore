@@ -26,3 +26,6 @@ Thumbs.db
 
 # Artefacts de viz locaux
 graphify-out/
+
+# Audits et artefacts locaux
+audit/
