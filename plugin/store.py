@@ -1595,14 +1595,32 @@ class LanceDBStore:
 
             claims_may_change = "content" in updates or "category" in updates
             if claims_may_change and not self._close_conflicts_for_memory(memory_id):
-                return False
+                raise self._contract_error(
+                    "update_not_committed", "update",
+                    "update stopped before any change was committed",
+                    {"commit_state": "none", "committed": [],
+                     "failed_step": "memory_conflicts.close"},
+                    "a committed update or a reported partial state",
+                )
 
             if updates:
                 updates["updated_at"] = now
                 self._table.update(f"id = {memory_id_literal}", updates)
 
+            committed = ["memories.content"] if updates else []
+
             if claims_may_change:
-                self.detect_conflicts_for(memory_id)
+                try:
+                    self.detect_conflicts_for(memory_id)
+                except Exception as error:
+                    raise self._contract_error(
+                        "update_partially_committed", "update",
+                        "update committed the main write but a later step failed",
+                        {"commit_state": "partial", "committed": list(committed),
+                         "failed_step": "memory_conflicts.detect",
+                         "failed_error": str(error)},
+                        "either a full update or a reported partial commit",
+                    ) from error
 
             if relations_to_replace is not None:
                 normalized_relations = self._write_relations_list(memory_id, relations_to_replace)
@@ -1610,12 +1628,16 @@ class LanceDBStore:
                     f"id = {memory_id_literal}",
                     {"relations": json.dumps(normalized_relations), "updated_at": now},
                 )
+                committed.append("memories.relations")
 
             if "entities" in updates and "links_rebuild_done" not in kwargs:
                 self._rebuild_all_links()
+                committed.append("memory_edges.links")
 
             return True
         except MemoryEmbeddingError:
+            raise
+        except MemoryContractError:
             raise
         except Exception as e:
             logger.error("Update failed: %s", e)

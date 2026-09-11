@@ -653,6 +653,48 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertTrue(self.store.update(second_id, legacy=True, category="project"))
         self.assertEqual(1, len(self.store.get_conflicts(status="open")))
 
+    def test_update_reports_partial_commit_after_conflict_detection_failure(self):
+        memory_id = self.store.add_memory(self.structured())["memory_id"]
+        self.store.detect_conflicts_for = lambda _memory_id: (_ for _ in ()).throw(
+            RuntimeError("ledger unavailable")
+        )
+
+        with self.assertRaises(MemoryContractError) as caught:
+            self.store.update_memory(MemoryPatch.from_mapping({
+                "memory_id": memory_id,
+                "facts": ["state=ready"],
+            }))
+
+        issue = caught.exception.issue
+        self.assertEqual("update_partially_committed", issue.code)
+        self.assertEqual("update", issue.field)
+        self.assertEqual("partial", issue.received["commit_state"])
+        self.assertIn("memories.content", issue.received["committed"])
+        self.assertEqual("memory_conflicts.detect", issue.received["failed_step"])
+        self.assertEqual(
+            "Project:Alpha state=ready [Tier=2]",
+            self.store._get_by_id_raw(memory_id)["content"],
+        )
+
+    def test_update_reports_nothing_committed_when_precommit_step_fails(self):
+        memory_id = self.store.add_memory(self.structured())["memory_id"]
+        self.store._close_conflicts_for_memory = lambda _memory_id: False
+
+        with self.assertRaises(MemoryContractError) as caught:
+            self.store.update_memory(MemoryPatch.from_mapping({
+                "memory_id": memory_id,
+                "facts": ["state=ready"],
+            }))
+
+        issue = caught.exception.issue
+        self.assertEqual("update_not_committed", issue.code)
+        self.assertEqual("none", issue.received["commit_state"])
+        self.assertEqual([], issue.received["committed"])
+        self.assertEqual(
+            "Project:Alpha state=active [Tier=2]",
+            self.store._get_by_id_raw(memory_id)["content"],
+        )
+
     def test_delete_closes_open_conflicts(self):
         self.add("Project:Alpha port=7777 [Tier=2]")
         second_id = self.add("Project:Alpha port=7778 [Tier=2]")
