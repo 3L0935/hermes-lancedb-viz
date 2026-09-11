@@ -341,6 +341,28 @@ class VizRetentionTests(unittest.TestCase):
         self.assertIn("fetch('/api/memories/' + nodeId", graph)
         self.assertNotIn("fetch('/api/update'", graph)
 
+    def test_database_text_is_escaped_before_html_sinks(self):
+        app = (ROOT / "static" / "app.js").read_text()
+        graph = (ROOT / "static" / "graph.js").read_text()
+
+        for unsafe in (
+            "+ (m.content || '').substring",
+            "+ (m.content||'').substring",
+            "' + (m.content || '') + '",
+            "' + e + '</span>",
+            "' + t + '</span>",
+            "tooltip.innerHTML = (found.content",
+        ):
+            self.assertNotIn(unsafe, app)
+        for unsafe in (
+            "' + data.error + '",
+            "' + e + '</span>",
+            "' + item.type + '</span>",
+        ):
+            self.assertNotIn(unsafe, graph)
+        self.assertIn("tooltip.textContent", app)
+        self.assertIn("function safeCategory", graph)
+
 
 if __name__ == "__main__":
     unittest.main()

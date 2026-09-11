@@ -257,7 +257,7 @@ function openSidebar(nodeId) {
   fetch('/api/memory?id=' + nodeId)
     .then(r => r.json())
     .then(data => {
-      if (data.error) { content.innerHTML = '<div class="detail-meta" style="color:red;">' + data.error + '</div>'; return; }
+      if (data.error) { content.innerHTML = '<div class="detail-meta" style="color:red;">' + escapeHtml(data.error) + '</div>'; return; }
       const fullContent = data.content || n.title || n.label || '';
       const category = data.category || n.category || 'fact';
       const catLabel = catLabels[category] || category || 'Fact';
@@ -316,7 +316,7 @@ function renderSidebarContent(content, nodeId, fullContent, category, catLabel, 
   let entityChips = '';
   if (entities.length) {
     entityChips = '<div class="detail-meta" style="margin-top:8px;">Entities (' + entities.length + ')</div><div class="detail-ents">' +
-      entities.map(e => '<span onclick="searchEntity(\'' + escapeHtmlAttr(e) + '\')">' + e + '</span>').join('') +
+      entities.map(e => '<span onclick="searchEntity(\'' + escapeJsString(e) + '\')">' + escapeHtml(e) + '</span>').join('') +
       '</div>';
   }
 
@@ -375,10 +375,10 @@ function renderSidebarContent(content, nodeId, fullContent, category, catLabel, 
     relatedHtml = '<div class="detail-links-list"><div class="detail-meta" style="color:#a78bfa;">Related (' + relatedItems.length + ')</div>';
     relatedItems.forEach(item => {
       const typeClass = item.type === 'shared' ? 'typed-tag-shared' : 'typed-tag';
-      relatedHtml += '<div class="detail-link-item typed-link" onclick="openSidebar(\'' + item.id + '\')">' +
-        '<span class="cat-badge cat-' + item.cat + '" style="font-size:9px;padding:1px 6px;margin-bottom:0">' + (catLabels[item.cat] || '?') + '</span>' +
-        '<span class="' + typeClass + '">' + item.type + '</span>' +
-        (item.dir ? ' <span style="color:#a78bfa;font-size:10px;">' + item.dir + '</span>' : '') +
+      relatedHtml += '<div class="detail-link-item typed-link" onclick="openSidebar(\'' + escapeJsString(item.id) + '\')">' +
+        '<span class="cat-badge cat-' + safeCategory(item.cat) + '" style="font-size:9px;padding:1px 6px;margin-bottom:0">' + escapeHtml(catLabels[safeCategory(item.cat)] || '?') + '</span>' +
+        '<span class="' + typeClass + '">' + escapeHtml(item.type) + '</span>' +
+        (item.dir ? ' <span style="color:#a78bfa;font-size:10px;">' + escapeHtml(item.dir) + '</span>' : '') +
         ' ' + escapeHtml(item.label) +
         '</div>';
     });
@@ -400,8 +400,8 @@ function renderSidebarContent(content, nodeId, fullContent, category, catLabel, 
       const otherLabel = otherNode ? (otherNode.label || otherNode.title || otherId).substring(0, 50) : otherId;
       const simScore = parseFloat(e.label);
       const simColor = simScore > 0.9 ? '#6ee7b7' : simScore > 0.8 ? '#a5b4fc' : '#64748b';
-      vecHtml += '<div class="detail-link-item" onclick="openSidebar(\'' + otherId + '\')">' +
-        '<span class="cat-badge cat-' + (otherNode ? (otherNode.category || 'fact') : 'fact') + '" style="font-size:9px;padding:1px 6px;margin-bottom:0">' + (catLabels[otherNode?.category] || '?') + '</span>' +
+      vecHtml += '<div class="detail-link-item" onclick="openSidebar(\'' + escapeJsString(otherId) + '\')">' +
+        '<span class="cat-badge cat-' + safeCategory(otherNode?.category) + '" style="font-size:9px;padding:1px 6px;margin-bottom:0">' + escapeHtml(catLabels[safeCategory(otherNode?.category)] || '?') + '</span>' +
         escapeHtml(otherLabel) +
         '<span style="float:right;color:' + simColor + ';font-size:10px;font-weight:600;">' + (simScore*100).toFixed(0) + '%</span>' +
         '</div>';
@@ -410,18 +410,18 @@ function renderSidebarContent(content, nodeId, fullContent, category, catLabel, 
   }
 
   content.innerHTML =
-    '<div class="cat-badge cat-' + category + '">' + catLabel + '</div>' +
+    '<div class="cat-badge cat-' + safeCategory(category) + '">' + escapeHtml(catLabel) + '</div>' +
     statsHtml +
     '<div class="detail-content" id="detail-text">' + escapeHtml(fullContent) + '</div>' +
-    '<div class="detail-meta" style="margin-top:4px;">' + dateStr + '</div>' +
+    '<div class="detail-meta" style="margin-top:4px;">' + escapeHtml(dateStr) + '</div>' +
     entityChips +
     vecHtml +
     relatedHtml +
     '<div class="detail-actions">' +
-      '<button class="btn-focus" onclick="focusNode(\'' + nodeId + '\')">Center</button>' +
+      '<button class="btn-focus" onclick="focusNode(\'' + escapeJsString(nodeId) + '\')">Center</button>' +
       '<button class="btn-focus" onclick="toggleEdit()">Edit</button>' +
-      '<button class="btn-focus btn-copy" onclick="copyMemoryJSON(\'' + nodeId + '\')">Copy JSON</button>' +
-      '<button class="btn-delete" onclick="deleteNode(\'' + nodeId + '\')">Delete</button>' +
+      '<button class="btn-focus btn-copy" onclick="copyMemoryJSON(\'' + escapeJsString(nodeId) + '\')">Copy JSON</button>' +
+      '<button class="btn-delete" onclick="deleteNode(\'' + escapeJsString(nodeId) + '\')">Delete</button>' +
     '</div>';
 
   content.dataset.nodeId = nodeId;
@@ -451,18 +451,18 @@ function renderHubSidebar(content, hubId, hubNode) {
     : childNodes.map(cn => {
         const lcat = catLabels[cn.category] || cn.category || 'Fact';
         const disp = (cn.title || cn.label || '')[0] === '?' ? (cn.title || cn.label || '').substring(1).trim() : (cn.title || cn.label || '');
-        return '<div class="detail-link-item" onclick="openSidebar(\'' + cn.id + '\')">' +
-          '<span class="cat-badge cat-' + (cn.category || 'fact') + '" style="font-size:10px;padding:1px 6px;margin-bottom:0">' + lcat + '</span>' +
+        return '<div class="detail-link-item" onclick="openSidebar(\'' + escapeJsString(cn.id) + '\')">' +
+          '<span class="cat-badge cat-' + safeCategory(cn.category) + '" style="font-size:10px;padding:1px 6px;margin-bottom:0">' + escapeHtml(lcat) + '</span>' +
           escapeHtml(disp) + '</div>';
       }).join('');
 
   content.innerHTML =
-    '<div class="cat-badge cat-' + (hubNode.category || 'fact') + '">Hub</div>' +
+    '<div class="cat-badge cat-' + safeCategory(hubNode.category) + '">Hub</div>' +
     '<div style="font-family:\'Fira Code\',monospace;font-size:13px;color:#a5b4fc;margin-bottom:6px;">' + escapeHtml(hubNode.label || '') + '</div>' +
     '<div class="detail-meta" style="margin-bottom:12px;">' + escapeHtml(hubNode.title || hubNode.label || '') + '</div>' +
     '<div class="detail-meta">' + childNodes.length + ' linked memories:</div>' +
     '<div class="detail-links-list" style="margin-top:8px;">' + itemsHtml + '</div>' +
-    '<div class="detail-actions" style="margin-top:14px;"><button class="btn-focus" onclick="focusNode(\'' + hubId + '\')">Center</button></div>';
+    '<div class="detail-actions" style="margin-top:14px;"><button class="btn-focus" onclick="focusNode(\'' + escapeJsString(hubId) + '\')">Center</button></div>';
 }
 
 // ═══════════════════════════════════════════════
@@ -478,7 +478,7 @@ function toggleEdit() {
   try { currentEntities = JSON.parse(content.dataset.entities || '[]'); } catch(e) {}
 
   const entityTags = currentEntities.map(e =>
-    '<span class="entity-tag-edit" onclick="removeEntityEdit(\'' + escapeHtmlAttr(e) + '\')">' + e + ' ✕</span>'
+    '<span class="entity-tag-edit" onclick="removeEntityEdit(\'' + escapeJsString(e) + '\')">' + escapeHtml(e) + ' ✕</span>'
   ).join('');
 
   content.innerHTML =
@@ -497,8 +497,8 @@ function toggleEdit() {
       '</div>' +
     '</div>' +
     '<div class="detail-actions" style="margin-top:12px;">' +
-      '<button class="btn-save" onclick="saveEdit(\'' + nodeId + '\')">Save</button>' +
-      '<button class="btn-focus" onclick="openSidebar(\'' + nodeId + '\')">Cancel</button>' +
+      '<button class="btn-save" onclick="saveEdit(\'' + escapeJsString(nodeId) + '\')">Save</button>' +
+      '<button class="btn-focus" onclick="openSidebar(\'' + escapeJsString(nodeId) + '\')">Cancel</button>' +
     '</div>';
 }
 
@@ -630,12 +630,12 @@ async function doSemanticSearch() {
   try {
     const resp = await fetch('/api/search?q=' + encodeURIComponent(query) + '&top_k=15');
     const data = await resp.json();
-    if (data.error) { panel.innerHTML = '<div class="search-empty">Error: ' + data.error + '</div>'; return; }
+    if (data.error) { panel.innerHTML = '<div class="search-empty">Error: ' + escapeHtml(data.error) + '</div>'; return; }
     if (!data.results.length) { panel.innerHTML = '<div class="search-empty">No results.</div>'; return; }
     panel.innerHTML = data.results.map(r => {
       const cat = catLabels[r.category] || r.category || 'Fact';
-      return '<div class="search-item" onclick="openSidebar(\'' + r.id + '\')">' +
-        '<span class="s-cat cat-' + (r.category || 'fact') + '">' + cat + '</span>' +
+      return '<div class="search-item" onclick="openSidebar(\'' + escapeJsString(r.id) + '\')">' +
+        '<span class="s-cat cat-' + safeCategory(r.category) + '">' + escapeHtml(cat) + '</span>' +
         '<span class="s-meta">score: ' + (r._distance ? r._distance.toFixed(2) : '0.00') + '</span>' +
         '<div class="s-content">' + escapeHtml((r.content || '').substring(0, 140)) + '</div></div>';
     }).join('');
@@ -703,6 +703,8 @@ document.getElementById('refresh-btn').addEventListener('click', () => { closeSe
 document.getElementById('sidebar-close').addEventListener('click', closeSidebar);
 
 // Helpers
-function escapeHtml(str) { const d = document.createElement('div'); d.textContent = str || ''; return d.innerHTML; }
-function escapeHtmlAttr(str) { return (str || '').replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escapeHtml(str) { const d = document.createElement('div'); d.textContent = str == null ? '' : String(str); return d.innerHTML; }
+function escapeHtmlAttr(str) { return String(str == null ? '' : str).replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function escapeJsString(str) { const value = String(str == null ? '' : str); let out = ''; for (let i = 0; i < value.length; i++) out += '\\u' + value.charCodeAt(i).toString(16).padStart(4, '0'); return out; }
+function safeCategory(value) { return Object.prototype.hasOwnProperty.call(catLabels, value) ? value : 'fact'; }
 function setEl(id, val) { const el = document.getElementById(id); if (el) el.textContent = val; }

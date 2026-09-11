@@ -62,7 +62,8 @@ function refreshData() {
 }
 
 function catBadge(cat) {
-  return '<span class="cat-badge cat-' + (cat || 'fact') + '">' + (colorLabel[cat] || cat || 'Fact') + '</span>';
+  const category = safeCategory(cat);
+  return '<span class="cat-badge cat-' + category + '">' + escapeHtml(colorLabel[category] || 'Fact') + '</span>';
 }
 
 function age(ts) {
@@ -111,14 +112,14 @@ async function loadDashboard() {
       ['DB Size', (stats.db_size_mb || '?') + ' MB', 'var(--muted)'],
     );
     el.innerHTML = statsHtml.map(([label,val,color]) =>
-      '<div class="stat-card"><div class="stat-value" style="color:' + color + ';font-size:' + (typeof val === 'string' ? '16px' : '22px') + '">' + val + '</div><div class="stat-label">' + label + '</div></div>'
+      '<div class="stat-card"><div class="stat-value" style="color:' + color + ';font-size:' + (typeof val === 'string' ? '16px' : '22px') + '">' + escapeHtml(val) + '</div><div class="stat-label">' + escapeHtml(label) + '</div></div>'
     ).join('');
 
     // Categories bar chart
     const catMax = Math.max(1, ...Object.values(cats));
     document.getElementById('dash-categories').innerHTML = Object.entries(cats)
       .sort((a,b) => b[1]-a[1]).map(([k,v]) =>
-        '<div class="bar-row"><span class="bar-label">' + (colorLabel[k] || k) + '</span><div class="bar-track"><div class="bar-fill" style="width:' + (v/catMax*100).toFixed(0) + '%;background:' + (colorHex[k] || colorHexDef) + '"></div></div><span class="bar-count">' + v + '</span></div>'
+        '<div class="bar-row"><span class="bar-label">' + escapeHtml(colorLabel[safeCategory(k)] || 'Fact') + '</span><div class="bar-track"><div class="bar-fill" style="width:' + (v/catMax*100).toFixed(0) + '%;background:' + (colorHex[safeCategory(k)] || colorHexDef) + '"></div></div><span class="bar-count">' + escapeHtml(v) + '</span></div>'
       ).join('');
 
     // Tiers bar chart
@@ -134,18 +135,18 @@ async function loadDashboard() {
     const tagMax = Math.max(1, ...tagEntries.map(([,v])=>v));
     document.getElementById('dash-tags').innerHTML = tagEntries.length
       ? tagEntries.map(([k,v]) =>
-          '<div class="bar-row"><span class="bar-label">' + k + '</span><div class="bar-track"><div class="bar-fill" style="width:' + (v/tagMax*100).toFixed(0) + '%;background:#a78bfa"></div></div><span class="bar-count">' + v + '</span></div>'
+          '<div class="bar-row"><span class="bar-label">' + escapeHtml(k) + '</span><div class="bar-track"><div class="bar-fill" style="width:' + (v/tagMax*100).toFixed(0) + '%;background:#a78bfa"></div></div><span class="bar-count">' + escapeHtml(v) + '</span></div>'
         ).join('')
       : '<div class="empty-state">No tags</div>';
 
     // Top accessed
     const top = dash.top_accessed || [];
     document.getElementById('dash-accessed').innerHTML = top.length
-      ? top.map(m => '<div class="timeline-item" onclick="showMemoryDetail(\'' + m.id + '\')">' + catBadge(m.category) + ' ' + (m.content || '').substring(0,80) + ' <span style="color:var(--muted);font-size:10px;">(' + (m.access_count || 0) + 'x)</span></div>').join('')
+      ? top.map(m => '<div class="timeline-item" onclick="showMemoryDetail(\'' + escapeJsString(m.id) + '\')">' + catBadge(m.category) + ' ' + escapeHtml((m.content || '').substring(0,80)) + ' <span style="color:var(--muted);font-size:10px;">(' + escapeHtml(m.access_count || 0) + 'x)</span></div>').join('')
       : '<div class="empty-state">No data</div>';
 
   } catch(e) {
-    el.innerHTML = '<div class="error-state">Error: ' + e.message + '</div>';
+    el.innerHTML = '<div class="error-state">Error: ' + escapeHtml(e.message) + '</div>';
   }
 }
 
@@ -182,12 +183,12 @@ async function loadMemories() {
     const data = await r.json();
     const mems = data.memories || [];
     tbody.innerHTML = mems.map(m =>
-      '<tr onclick="showMemoryDetail(\'' + m.id + '\')" style="cursor:pointer;">' +
-        '<td class="cb-col" onclick="event.stopPropagation()"><input type="checkbox" class="mem-cb" value="' + m.id + '" onchange="updateBulkBar()"></td>' +
-        '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (m.content || '').substring(0,120) + '</td>' +
+      '<tr onclick="showMemoryDetail(\'' + escapeJsString(m.id) + '\')" style="cursor:pointer;">' +
+        '<td class="cb-col" onclick="event.stopPropagation()"><input type="checkbox" class="mem-cb" value="' + escapeHtmlAttr(m.id) + '" onchange="updateBulkBar()"></td>' +
+        '<td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escapeHtml((m.content || '').substring(0,120)) + '</td>' +
         '<td>' + catBadge(m.category) + '</td>' +
         '<td>' + badgeForTier(m.tier) + '</td>' +
-        '<td>' + (m.tags || []).slice(0,3).map(t => '<span class="tag-badge" style="font-size:9px;padding:1px 5px;">' + t + '</span>').join('') + '</td>' +
+        '<td>' + (m.tags || []).slice(0,3).map(t => '<span class="tag-badge" style="font-size:9px;padding:1px 5px;">' + escapeHtml(t) + '</span>').join('') + '</td>' +
         '<td><div class="quality-bar"><div class="quality-fill" style="width:' + Math.max(4, ((m.quality||0)*100)).toFixed(0) + '%;background:' + (m.quality>=0.7?'#6ee7b7':m.quality>=0.4?'#fbbf24':'#fca5a5') + ';min-width:4px;"></div></div></td>' +
         '<td style="color:var(--muted);font-size:10px;">' + age(m.created_at) + '</td>' +
       '</tr>'
@@ -199,7 +200,7 @@ async function loadMemories() {
       '<span class="page-info">' + (Math.floor(memOffset/MEM_LIMIT)+1) + '/' + pages + ' (' + total + ' total)</span>' +
       '<button class="btn-neon btn-focus" onclick="memOffset=' + Math.min(memOffset+MEM_LIMIT,((pages-1)*MEM_LIMIT)) + ';loadMemories()" ' + (memOffset>= ((pages-1)*MEM_LIMIT||0)?'disabled':'') + '>&rarr;</button>';
     document.getElementById('mem-sel-all').checked = false;
-  } catch(e) { tbody.innerHTML = '<tr><td colspan="7" class="error-state">Error: ' + e.message + '</td></tr>'; }
+  } catch(e) { tbody.innerHTML = '<tr><td colspan="7" class="error-state">Error: ' + escapeHtml(e.message) + '</td></tr>'; }
 }
 
 async function deleteSingleMemory(memoryId) {
@@ -229,11 +230,11 @@ function showMemoryDetail(id) {
     const html =
       '<div class="modal-overlay" onclick="if(event.target===this)this.remove()">' +
         '<div class="modal">' +
-          '<div class="modal-title">' + catBadge(m.category) + ' <span style="color:var(--muted);font-size:11px;">' + (m.type || '') + '</span></div>' +
-          '<div style="background:rgba(20,20,40,0.5);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:\'Fira Code\',monospace;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;min-height:100px;max-height:400px;overflow-y:auto;">' + (m.content || '') + '</div>' +
+          '<div class="modal-title">' + catBadge(m.category) + ' <span style="color:var(--muted);font-size:11px;">' + escapeHtml(m.type || '') + '</span></div>' +
+          '<div style="background:rgba(20,20,40,0.5);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:\'Fira Code\',monospace;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;min-height:100px;max-height:400px;overflow-y:auto;">' + escapeHtml(m.content || '') + '</div>' +
           '<div style="margin-top:10px;color:var(--muted);font-size:11px;">Quality: ' + ((m.quality||0)*100).toFixed(0) + '% · Accessed: ' + (m.access_count||0) + 'x · Created: ' + new Date((m.created_at||0)*1000).toLocaleString() + '</div>' +
-          '<div style="margin-top:8px;">' + (m.entities||[]).map(e => '<span class="tag-badge">' + e + '</span>').join('') + '</div>' +
-          '<div style="margin-top:8px;">' + (m.tags||[]).map(t => '<span class="tag-badge">' + t + '</span>').join('') + '</div>' +
+          '<div style="margin-top:8px;">' + (m.entities||[]).map(e => '<span class="tag-badge">' + escapeHtml(e) + '</span>').join('') + '</div>' +
+          '<div style="margin-top:8px;">' + (m.tags||[]).map(t => '<span class="tag-badge">' + escapeHtml(t) + '</span>').join('') + '</div>' +
           '<div class="modal-actions"><button class="btn-neon btn-focus" onclick="this.closest(\'.modal-overlay\').remove()">Close</button></div>' +
         '</div>' +
       '</div>';
@@ -257,14 +258,14 @@ async function loadTags() {
     el.innerHTML = entries.length
       ? entries.map(([tag, count]) =>
           '<div class="dup-group" style="display:flex;align-items:center;gap:10px;padding:8px 14px;">' +
-            '<span class="tag-badge" style="font-size:12px;padding:4px 12px;min-width:80px;text-align:center;">' + tag + '</span>' +
+            '<span class="tag-badge" style="font-size:12px;padding:4px 12px;min-width:80px;text-align:center;">' + escapeHtml(tag) + '</span>' +
             '<div style="flex:1;"><div class="quality-bar" style="width:100%;"><div class="quality-fill" style="width:' + (count/maxCount*100).toFixed(0) + '%;background:var(--accent)"></div></div></div>' +
             '<span style="color:var(--muted);font-size:11px;min-width:28px;text-align:right;">' + count + '</span>' +
-            '<button class="btn-neon btn-delete" onclick="deleteTag(\'' + tag + '\')">Delete</button>' +
+            '<button class="btn-neon btn-delete" onclick="deleteTag(\'' + escapeJsString(tag) + '\')">Delete</button>' +
           '</div>'
         ).join('')
       : '<div class="empty-state">No tags</div>';
-  } catch(e) { el.innerHTML = '<div class="error-state">Error: ' + e.message + '</div>'; }
+  } catch(e) { el.innerHTML = '<div class="error-state">Error: ' + escapeHtml(e.message) + '</div>'; }
 }
 
 async function deleteTag(tag) {
@@ -294,15 +295,15 @@ async function loadTimeline() {
     if (!data.length) { el.innerHTML = '<div class="empty-state">No memories</div>'; return; }
     el.innerHTML = '<div class="timeline"><div class="timeline-line"></div>' +
       data.map(g =>
-        '<div class="timeline-group"><div class="timeline-dot"></div><div class="timeline-date">' + g.date + ' <span style="font-weight:400;color:var(--muted);font-size:11px;">(' + g.count + ')</span></div>' +
+        '<div class="timeline-group"><div class="timeline-dot"></div><div class="timeline-date">' + escapeHtml(g.date) + ' <span style="font-weight:400;color:var(--muted);font-size:11px;">(' + escapeHtml(g.count) + ')</span></div>' +
         (g.memories||[]).slice(0,10).map(m =>
-          '<div class="timeline-item" onclick="showMemoryDetail(\'' + m.id + '\')">' + catBadge(m.category) + ' ' + (m.content||'').substring(0,120) + ' <span style="color:var(--muted);font-size:10px;">' + age(m.created_at) + '</span></div>'
+          '<div class="timeline-item" onclick="showMemoryDetail(\'' + escapeJsString(m.id) + '\')">' + catBadge(m.category) + ' ' + escapeHtml((m.content||'').substring(0,120)) + ' <span style="color:var(--muted);font-size:10px;">' + age(m.created_at) + '</span></div>'
         ).join('') +
         (g.count > 10 ? '<div style="color:var(--muted);font-size:10px;padding:4px 12px;">+' + (g.count-10) + ' more</div>' : '') +
         '</div>'
       ).join('') +
     '</div>';
-  } catch(e) { el.innerHTML = '<div class="error-state">Error: ' + e.message + '</div>'; }
+  } catch(e) { el.innerHTML = '<div class="error-state">Error: ' + escapeHtml(e.message) + '</div>'; }
 }
 
 // ═══════════════════════════════════════════════
@@ -322,17 +323,17 @@ async function loadDuplicates() {
       '<div class="dup-group">' +
         '<div class="dup-group-header"><span style="font-size:13px;font-weight:600;color:var(--accent);">Group ' + (gi+1) + ' <span style="font-weight:400;color:var(--muted);font-size:11px;">(' + g.size + ')</span></span></div>' +
         (g.memories||[]).map((m, mi) =>
-          '<div class="dup-item" onclick="showMemoryDetail(\'' + m.id + '\')">' +
+          '<div class="dup-item" onclick="showMemoryDetail(\'' + escapeJsString(m.id) + '\')">' +
             '<span style="color:' + (mi===0?'var(--accent)':'var(--muted)') + ';font-size:10px;min-width:20px;">#' + (mi+1) + '</span>' +
             catBadge(m.category) +
-            '<span style="flex:1;">' + (m.content||'').substring(0,150) + '</span>' +
+            '<span style="flex:1;">' + escapeHtml((m.content||'').substring(0,150)) + '</span>' +
             '<span style="color:var(--muted);font-size:10px;">' + ((m.quality||0)*100).toFixed(0) + '%</span>' +
-            '<button class="btn-neon btn-delete" style="padding:2px 8px;font-size:10px;margin-left:4px;" onclick="event.stopPropagation();deleteSingleMemory(\'' + m.id + '\')">✕</button>' +
+            '<button class="btn-neon btn-delete" style="padding:2px 8px;font-size:10px;margin-left:4px;" onclick="event.stopPropagation();deleteSingleMemory(\'' + escapeJsString(m.id) + '\')">✕</button>' +
           '</div>'
         ).join('') +
       '</div>'
     ).join('');
-  } catch(e) { el.innerHTML = '<div class="error-state">Error: ' + e.message + '</div>'; }
+  } catch(e) { el.innerHTML = '<div class="error-state">Error: ' + escapeHtml(e.message) + '</div>'; }
 }
 
 // Conflicts
@@ -352,14 +353,14 @@ async function loadConflicts() {
       return;
     }
     el.innerHTML = rows.map(c =>
-      '<div class="conflict-card conflict-' + (c.status || 'open') + '">' +
+      '<div class="conflict-card conflict-' + (c.status === 'resolved' || c.status === 'archived' ? c.status : 'open') + '">' +
         '<div class="conflict-head"><span class="typed-tag">' + escapeHtml(c.claim_key || 'claim') + '</span>' +
         '<span class="conflict-subject">' + escapeHtml(c.subject || '') + '</span>' +
         '<span class="conflict-status">' + escapeHtml(c.status || 'open') + '</span></div>' +
         '<div class="conflict-pair">' +
-          '<button class="conflict-memory" onclick="showMemoryDetail(\'' + c.memory_a_id + '\')"><b>' + escapeHtml(c.value_a || '') + '</b><span>' + escapeHtml((c.memory_a_content || '').substring(0, 180)) + '</span></button>' +
+          '<button class="conflict-memory" onclick="showMemoryDetail(\'' + escapeJsString(c.memory_a_id) + '\')"><b>' + escapeHtml(c.value_a || '') + '</b><span>' + escapeHtml((c.memory_a_content || '').substring(0, 180)) + '</span></button>' +
           '<span class="conflict-vs">vs</span>' +
-          '<button class="conflict-memory" onclick="showMemoryDetail(\'' + c.memory_b_id + '\')"><b>' + escapeHtml(c.value_b || '') + '</b><span>' + escapeHtml((c.memory_b_content || '').substring(0, 180)) + '</span></button>' +
+          '<button class="conflict-memory" onclick="showMemoryDetail(\'' + escapeJsString(c.memory_b_id) + '\')"><b>' + escapeHtml(c.value_b || '') + '</b><span>' + escapeHtml((c.memory_b_content || '').substring(0, 180)) + '</span></button>' +
         '</div>' +
       '</div>'
     ).join('');
@@ -400,7 +401,7 @@ async function loadEmbedding() {
 
     const categories = [...new Set(points.map(p => p.category))];
     document.getElementById('emb-legend').innerHTML = categories.map(c =>
-      '<span style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);"><span style="width:10px;height:10px;border-radius:50%;background:' + (colorHex[c] || colorHexDef) + '"></span>' + (colorLabel[c] || c) + '</span>'
+      '<span style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--muted);"><span style="width:10px;height:10px;border-radius:50%;background:' + (colorHex[safeCategory(c)] || colorHexDef) + '"></span>' + escapeHtml(colorLabel[safeCategory(c)] || 'Fact') + '</span>'
     ).join('');
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -423,7 +424,7 @@ async function loadEmbedding() {
         tooltip.style.display = 'block';
         tooltip.style.left = (e.clientX - rect.left + 12) + 'px';
         tooltip.style.top = (e.clientY - rect.top - 10) + 'px';
-        tooltip.innerHTML = (found.content || '').substring(0,120);
+        tooltip.textContent = (found.content || '').substring(0,120);
       } else tooltip.style.display = 'none';
     };
     container.onclick = function(e) {
@@ -472,14 +473,14 @@ async function loadClusters() {
     el.innerHTML = clusters.map((c, i) => {
       const name = clusterName(c.members || []);
       return '<div class="dup-group">' +
-        '<div class="dup-group-header"><span style="font-size:13px;font-weight:600;color:' + clColors[i%clColors.length] + '">' + name + ' <span style="font-weight:400;color:var(--muted);font-size:11px;">(' + c.size + ')</span></span></div>' +
+        '<div class="dup-group-header"><span style="font-size:13px;font-weight:600;color:' + clColors[i%clColors.length] + '">' + escapeHtml(name) + ' <span style="font-weight:400;color:var(--muted);font-size:11px;">(' + c.size + ')</span></span></div>' +
         (c.members||[]).slice(0,15).map(m =>
-          '<div class="dup-item" onclick="showMemoryDetail(\'' + m.id + '\')">' + catBadge(m.category) + ' ' + (m.content||'').substring(0,130) + '</div>'
+          '<div class="dup-item" onclick="showMemoryDetail(\'' + escapeJsString(m.id) + '\')">' + catBadge(m.category) + ' ' + escapeHtml((m.content||'').substring(0,130)) + '</div>'
         ).join('') +
         (c.size > 15 ? '<div style="color:var(--muted);font-size:10px;padding:4px 8px;">+' + (c.size-15) + ' more</div>' : '') +
       '</div>';
     }).join('');
-  } catch(e) { el.innerHTML = '<div class="error-state">Error: ' + e.message + '</div>'; }
+  } catch(e) { el.innerHTML = '<div class="error-state">Error: ' + escapeHtml(e.message) + '</div>'; }
 }
 
 // ═══════════════════════════════════════════════
@@ -498,14 +499,14 @@ async function loadStale() {
     if (!Array.isArray(stale)) stale = [];
     if (!stale.length) { el.innerHTML = '<div class="empty-state">No stale memories</div>'; return; }
     el.innerHTML = stale.map(m =>
-      '<div class="dup-item" onclick="showMemoryDetail(\'' + m.id + '\')" style="display:flex;align-items:center;gap:8px;">' +
+      '<div class="dup-item" onclick="showMemoryDetail(\'' + escapeJsString(m.id) + '\')" style="display:flex;align-items:center;gap:8px;">' +
         catBadge(m.category) +
-        '<span style="flex:1;">' + (m.content||'').substring(0,140) + '</span>' +
+        '<span style="flex:1;">' + escapeHtml((m.content||'').substring(0,140)) + '</span>' +
         '<span style="color:var(--muted);font-size:10px;">' + age(m.created_at) + '</span>' +
         '<span style="font-size:10px;color:#fca5a5;">' + ((m.quality||0)*100).toFixed(0) + '%</span>' +
       '</div>'
     ).join('');
-  } catch(e) { el.innerHTML = '<div class="error-state">Error: ' + e.message + '</div>'; }
+  } catch(e) { el.innerHTML = '<div class="error-state">Error: ' + escapeHtml(e.message) + '</div>'; }
 }
 
 async function deleteAllStale() {
