@@ -450,6 +450,67 @@ async function loadHealth() {
   }
 }
 
+let compactionPlanReady = false;
+
+async function loadCompactionPlan() {
+  const button = document.getElementById('compact-plan-button');
+  const panel = document.getElementById('compact-plan');
+  const content = document.getElementById('compact-plan-content');
+  button.disabled = true;
+  button.textContent = 'Planning...';
+  panel.hidden = false;
+  compactionPlanReady = false;
+  try {
+    const plan = await fetch(API + '/maintenance/compact/plan').then(response => response.json());
+    if (plan.error) throw new Error(plan.error);
+    const deleted = (plan.backups_to_delete || []).length
+      ? (plan.backups_to_delete || []).map(path => '<li>' + escapeHtml(path) + '</li>').join('')
+      : '<li>None</li>';
+    content.innerHTML =
+      '<div class="compact-metrics"><span>Current <b>' + formatBytes(plan.size_before_bytes) + '</b></span><span>Estimated after <b>' + formatBytes(plan.estimated_after_bytes) + '</b></span></div>' +
+      '<p>Backup to create: <code>' + escapeHtml(plan.backup_to_create) + '</code></p>' +
+      '<p>Old managed backups to delete:</p><ul>' + deleted + '</ul>' +
+      '<label class="compact-confirm"><input id="compact-confirm" type="checkbox" onchange="document.getElementById(\'compact-run\').disabled=!this.checked"> I paused other writers and confirm this maintenance action.</label>' +
+      '<button id="compact-run" class="btn-neon btn-delete" onclick="runCompaction()" disabled>Compact database</button>' +
+      '<pre id="compact-result" class="compact-result" hidden></pre>';
+    compactionPlanReady = true;
+  } catch(e) {
+    content.innerHTML = '<div class="error-state">Compaction plan failed: ' + escapeHtml(e.message) + '</div>';
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Plan compaction';
+  }
+}
+
+async function runCompaction() {
+  const confirmed = document.getElementById('compact-confirm');
+  const button = document.getElementById('compact-run');
+  const output = document.getElementById('compact-result');
+  if (!compactionPlanReady || !confirmed?.checked) return;
+  if (!confirm('Create the displayed backup, purge only the listed managed backups, then compact all four tables?')) return;
+  button.disabled = true;
+  button.textContent = 'Compacting...';
+  output.hidden = false;
+  output.textContent = 'Backup and compaction in progress. Do not start another write.';
+  try {
+    const response = await fetch(API + '/maintenance/compact', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({confirmed: true}),
+    });
+    const result = await response.json();
+    output.textContent = JSON.stringify(result, null, 2);
+    if (result.success) {
+      compactionPlanReady = false;
+      await loadHealth();
+    }
+  } catch(e) {
+    output.textContent = 'Compaction request failed: ' + e.message;
+  } finally {
+    button.textContent = 'Compact database';
+    button.disabled = true;
+  }
+}
+
 // Embeddings (UMAP projection)
 // ═══════════════════════════════════════════════
 

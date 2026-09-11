@@ -21,9 +21,19 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse, urlsplit
 
 try:
-    from maintenance import collect_health_diagnostics, probe_ollama
+    from maintenance import (
+        collect_health_diagnostics,
+        compact_lancedb,
+        compaction_plan,
+        probe_ollama,
+    )
 except ImportError:
-    from server.maintenance import collect_health_diagnostics, probe_ollama
+    from server.maintenance import (
+        collect_health_diagnostics,
+        compact_lancedb,
+        compaction_plan,
+        probe_ollama,
+    )
 
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
@@ -295,6 +305,7 @@ def _structured_update(store, memory_id: str, data: dict) -> dict:
 import threading
 
 _cache_lock = threading.Lock()
+_compaction_lock = threading.Lock()
 _stats_cache = None       # (result_dict, timestamp)
 _stats_cache_ttl = 30.0   # seconds — refresh at most every 30s
 
@@ -1301,6 +1312,39 @@ def api_get_health() -> dict:
         return {"error": str(error), "read_only": True, "tables": {}}
 
 
+def api_get_compaction_plan() -> dict:
+    """GET compaction plan — calculate backup retention without writing."""
+    health = api_get_health()
+    if health.get("error"):
+        return health
+    estimate = health.get("maintenance_estimate", {})
+    return compaction_plan(
+        LANCEDB_PATH,
+        HERMES_HOME / "backups",
+        estimated_after_bytes=int(estimate.get("estimated_after_bytes") or 0),
+    )
+
+
+def api_compact(data: dict) -> dict:
+    """Run one confirmed manual compaction guarded within this server process."""
+    if data.get("confirmed") is not True:
+        return {
+            "error": "Explicit confirmation is required",
+            "code": "confirmation_required",
+        }
+    if not _compaction_lock.acquire(blocking=False):
+        return {
+            "error": "A compaction is already running",
+            "code": "compaction_in_progress",
+        }
+    try:
+        _reset_store()
+        return compact_lancedb(LANCEDB_PATH, HERMES_HOME / "backups")
+    finally:
+        _reset_store()
+        _compaction_lock.release()
+
+
 def api_get_clusters(threshold: float = 0.6, min_size: int = 2) -> list:
     """GET /api/clusters — semantic clusters."""
     try:
@@ -1806,6 +1850,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(api_get_projection(n_neighbors, min_dist))
         elif path == "/api/health":
             self._send_json(api_get_health())
+        elif path == "/api/maintenance/compact/plan":
+            self._send_json(api_get_compaction_plan())
         elif path == "/api/clusters":
             threshold = float(params.get("threshold", ["0.6"])[0])
             min_size = int(params.get("min_size", ["2"])[0])
@@ -1889,6 +1935,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(api_delete_tag(data))
         elif path == "/api/tags/merge":
             self._send_json(api_merge_tags(data))
+        elif path == "/api/maintenance/compact":
+            result = api_compact(data)
+            status = 409 if result.get("code") == "compaction_in_progress" else 200
+            self._send_json(result, status)
         else:
             # Check /api/memories/:id or /api/memories/:id/access
             match = _parse_memories_id_path(path)

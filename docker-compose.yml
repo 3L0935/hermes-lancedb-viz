@@ -12,6 +12,8 @@ services:
     volumes:
       # LanceDB data (rw — viz writes access counts, projections)
       - ~/.hermes/lancedb:/home/hermes/.hermes/lancedb:rw
+      # Manual pre-compaction backups (rw — only lancedb-pre-compact-* is managed)
+      - ~/.hermes/backups:/home/hermes/.hermes/backups:rw
       # Hermes agent code (ro — imports LanceDBStore)
       - ~/.hermes/hermes-agent:/home/hermes/.hermes/hermes-agent:ro
       # Static files from repo (ro — HTML/JS/CSS served to browser)
