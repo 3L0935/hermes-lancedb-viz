@@ -202,7 +202,7 @@ class StoreRetentionTests(unittest.TestCase):
 
     def test_portable_import_rejects_malformed_content(self):
         result = self.store.import_records([{
-            "id": "garbage",
+            "id": "aaaaaaaa-aaa",
             "content": "subjectless prose",
             "category": "fact",
         }])

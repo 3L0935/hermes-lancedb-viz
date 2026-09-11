@@ -230,6 +230,10 @@ VALID_RELATION_TYPES = {
     "uses", "extends", "supersedes", "invalidates", "contradicts",
 }
 
+_MEMORY_ID_RE = re.compile(
+    r"(?:[0-9a-f]{8}-[0-9a-f]{3}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+)
+
 CONFLICT_REGISTRY_RESOLVED_LIMIT = max(
     0, int(os.environ.get("LANCEDB_CONFLICT_RESOLVED_LIMIT", "1000"))
 )
@@ -243,6 +247,30 @@ def canonical_subject(content: str) -> str:
 
 def _sql_literal(value: str) -> str:
     return "'" + str(value).replace("'", "''") + "'"
+
+
+def is_canonical_memory_id(value: Any) -> bool:
+    """Return whether value is a generated 12-character ID or canonical UUID."""
+    return isinstance(value, str) and _MEMORY_ID_RE.fullmatch(value) is not None
+
+
+def _require_memory_id(value: Any, field: str = "memory_id") -> str:
+    if is_canonical_memory_id(value):
+        return value
+    raise MemoryContractError(ContractIssue(
+        code="invalid_memory_id",
+        field=field,
+        message="memory ID must use a canonical repository format",
+        received=value,
+        expected="a generated 12-character lowercase ID or a lowercase UUID",
+    ))
+
+
+def _require_relation_ids(relations: list[Any]) -> None:
+    for relation in relations:
+        candidate = relation.to_dict() if hasattr(relation, "to_dict") else relation
+        if isinstance(candidate, dict) and candidate.get("target_id"):
+            _require_memory_id(candidate["target_id"], "target_id")
 
 
 def _conflict_key(memory_a_id: str, memory_b_id: str, claim_key: str) -> str:
@@ -520,6 +548,8 @@ class LanceDBStore:
         """Resolve a relation target without guessing between duplicate subjects."""
         target_id = str(relation.get("target_id") or "").strip()
         target_label = str(relation.get("target") or relation.get("target_label") or "").strip()
+        if target_id:
+            _require_memory_id(target_id, "target_id")
         memories = self._get_all_raw()
         by_id = {str(memory["id"]): memory for memory in memories}
 
@@ -543,6 +573,8 @@ class LanceDBStore:
         import hashlib
         import pyarrow as pa
 
+        mem_id = _require_memory_id(mem_id)
+        mem_id_literal = _sql_literal(mem_id)
         table = self._ensure_edges_table()
         normalized = []
         now = time.time()
@@ -583,11 +615,11 @@ class LanceDBStore:
             table.merge_insert("edge_key")
             .when_matched_update_all()
             .when_not_matched_insert_all()
-            .when_not_matched_by_source_delete(f"source_id = '{mem_id}'")
+            .when_not_matched_by_source_delete(f"source_id = {mem_id_literal}")
             .execute(source)
         )
         table.checkout_latest()
-        committed = table.search().where(f"source_id = '{mem_id}'").to_list()
+        committed = table.search().where(f"source_id = {mem_id_literal}").to_list()
         committed_keys = {
             (
                 str(row.get("relation_type") or ""),
@@ -602,12 +634,16 @@ class LanceDBStore:
 
     def _cleanup_edges_for_memory(self, mem_id: str) -> bool:
         """Atomically remove incoming/outgoing edges and verify the result."""
+        mem_id = _require_memory_id(mem_id)
+        mem_id_literal = _sql_literal(mem_id)
         try:
             table = self._ensure_edges_table()
-            table.delete(f"source_id = '{mem_id}' OR target_id = '{mem_id}'")
+            table.delete(
+                f"source_id = {mem_id_literal} OR target_id = {mem_id_literal}"
+            )
             table.checkout_latest()
             remaining = table.search().where(
-                f"source_id = '{mem_id}' OR target_id = '{mem_id}'"
+                f"source_id = {mem_id_literal} OR target_id = {mem_id_literal}"
             ).limit(1).to_list()
             if remaining:
                 logger.error("Relation cleanup postcondition failed for %s", mem_id)
@@ -811,12 +847,20 @@ class LanceDBStore:
                 continue
             memory_a_id = str(record.get("memory_a_id") or "")
             memory_b_id = str(record.get("memory_b_id") or "")
+            conflict_id = str(record.get("id") or str(uuid4())[:12])
             claim_key = str(record.get("claim_key") or "").casefold()
-            if not claim_key or memory_a_id not in memory_ids or memory_b_id not in memory_ids:
+            if (
+                not claim_key
+                or not is_canonical_memory_id(conflict_id)
+                or not is_canonical_memory_id(memory_a_id)
+                or not is_canonical_memory_id(memory_b_id)
+                or memory_a_id not in memory_ids
+                or memory_b_id not in memory_ids
+            ):
                 continue
             status = record.get("status") if record.get("status") in {"open", "resolved"} else "open"
             normalized.append({
-                "id": str(record.get("id") or str(uuid4())[:12]),
+                "id": conflict_id,
                 "memory_a_id": memory_a_id,
                 "memory_b_id": memory_b_id,
                 "subject": str(record.get("subject") or ""),
@@ -851,6 +895,7 @@ class LanceDBStore:
         from uuid import uuid4
         import pyarrow as pa
 
+        memory_id = _require_memory_id(memory_id)
         current = self._get_by_id_raw(memory_id)
         if not current:
             return []
@@ -964,6 +1009,8 @@ class LanceDBStore:
     def get_conflicts(self, status: str = "", limit: int = 100,
                       memory_id: str = "") -> list[dict]:
         """List contradiction records with current memory content for inspection."""
+        if memory_id:
+            memory_id = _require_memory_id(memory_id)
         if status == "archived":
             rows = [
                 row for row in self.get_all_conflict_records(include_archived=True)
@@ -989,10 +1036,13 @@ class LanceDBStore:
     def _close_conflicts_for_memory(self, memory_id: str,
                                     reason: str = "claims changed") -> bool:
         """Close open conflicts before a memory's claims are rewritten."""
+        memory_id = _require_memory_id(memory_id)
+        memory_id_literal = _sql_literal(memory_id)
         try:
             table = self._ensure_conflicts_table()
             table.update(
-                f"(memory_a_id = '{memory_id}' OR memory_b_id = '{memory_id}') AND status = 'open'",
+                f"(memory_a_id = {memory_id_literal} OR memory_b_id = {memory_id_literal}) "
+                "AND status = 'open'",
                 {
                     "status": "resolved",
                     "resolved_at": time.time(),
@@ -1010,7 +1060,8 @@ class LanceDBStore:
     def resolve_conflict(self, conflict_id: str, resolution_note: str,
                          resolved_by: str = "user") -> bool:
         """Resolve an open conflict while preserving an explicit audit trail."""
-        if not conflict_id or not resolution_note.strip() or not resolved_by.strip():
+        conflict_id = _require_memory_id(conflict_id, "conflict_id")
+        if not resolution_note.strip() or not resolved_by.strip():
             return False
         table = self._ensure_conflicts_table()
         row = next(
@@ -1020,7 +1071,7 @@ class LanceDBStore:
         if not row or row.get("status") != "open":
             return False
         table.update(
-            f"id = '{row['id']}' AND status = 'open'",
+            f"id = {_sql_literal(row['id'])} AND status = 'open'",
             {
                 "status": "resolved",
                 "resolved_at": time.time(),
@@ -1226,6 +1277,7 @@ class LanceDBStore:
 
         clean_content = content.strip()
         relations_list = relations or []
+        _require_relation_ids(relations_list)
         relations_json = json.dumps(relations_list)
 
         vector = self._require_embedding(clean_content)
@@ -1267,7 +1319,7 @@ class LanceDBStore:
         # Replace typed relations and persist their resolved IDs in the memory row.
         normalized_relations = self._write_relations_list(mem_id, relations_list)
         self._table.update(
-            f"id = '{mem_id}'",
+            f"id = {_sql_literal(mem_id)}",
             {"relations": json.dumps(normalized_relations)},
         )
 
@@ -1431,6 +1483,8 @@ class LanceDBStore:
 
     def _apply_update(self, memory_id: str, **kwargs) -> bool:
         """Apply validated fields to one row."""
+        memory_id = _require_memory_id(memory_id)
+        memory_id_literal = _sql_literal(memory_id)
         self._fresh()
         try:
             existing = self._get_by_id_raw(memory_id)
@@ -1482,7 +1536,7 @@ class LanceDBStore:
 
             if updates:
                 updates["updated_at"] = now
-                self._table.update(f"id = '{memory_id}'", updates)
+                self._table.update(f"id = {memory_id_literal}", updates)
 
             if claims_may_change:
                 self.detect_conflicts_for(memory_id)
@@ -1490,7 +1544,7 @@ class LanceDBStore:
             if relations_to_replace is not None:
                 normalized_relations = self._write_relations_list(memory_id, relations_to_replace)
                 self._table.update(
-                    f"id = '{memory_id}'",
+                    f"id = {memory_id_literal}",
                     {"relations": json.dumps(normalized_relations), "updated_at": now},
                 )
 
@@ -1531,6 +1585,9 @@ class LanceDBStore:
             else:
                 raw_patch[field] = value
         patch = MemoryPatch.from_mapping(raw_patch)
+        _require_memory_id(patch.memory_id)
+        if patch.relations is not None:
+            _require_relation_ids(list(patch.relations))
         self._fresh()
         existing = self._get_by_id_raw(patch.memory_id)
         if not existing:
@@ -1614,6 +1671,7 @@ class LanceDBStore:
 
     def update(self, memory_id: str, *, legacy: bool = False, **kwargs) -> bool:
         """Legacy import/migration adapter; normal callers use update_memory."""
+        memory_id = _require_memory_id(memory_id)
         if not legacy:
             raise self._contract_error(
                 "legacy_api_disabled",
@@ -1649,19 +1707,32 @@ class LanceDBStore:
 
     def delete(self, memory_id: str) -> bool:
         """Delete a memory by ID."""
+        memory_id = _require_memory_id(memory_id)
+        memory_id_literal = _sql_literal(memory_id)
         self._fresh()
         try:
-            existing = self._table.search().where(f"id = '{memory_id}'").limit(1).to_list()
-            if not existing:
-                return False
+            existing = self._table.search().where(
+                f"id = {memory_id_literal}"
+            ).limit(2).to_list()
+            if len(existing) != 1:
+                code = "memory_not_found" if not existing else "non_unique_memory_id"
+                raise self._contract_error(
+                    code,
+                    "memory_id",
+                    "delete requires exactly one matching memory",
+                    memory_id,
+                    "exactly one existing memory",
+                )
             if not self._close_conflicts_for_memory(memory_id, reason="memory deleted"):
                 return False
             if not self._cleanup_edges_for_memory(memory_id):
                 return False
-            self._table.delete(f"id = '{memory_id}'")
+            self._table.delete(f"id = {memory_id_literal}")
             self._rebuild_all_links()
             self._update_db_size()
             return True
+        except MemoryContractError:
+            raise
         except Exception as e:
             logger.error("Delete failed: %s", e)
             return False
@@ -1694,13 +1765,21 @@ class LanceDBStore:
             if not content.strip():
                 skipped += 1
                 continue
-            if mem_id and mem_id in existing_ids:
+            if not mem_id:
+                mem_id = str(uuid4())[:12]
+
+            try:
+                mem_id = _require_memory_id(mem_id)
+                _require_relation_ids(relations)
+            except MemoryContractError as error:
+                skipped += 1
+                errors.append({"memory_id": mem_id, "error": error.to_dict()})
+                continue
+            if mem_id in existing_ids:
                 skipped += 1
                 if str(existing_by_id[mem_id].get("content") or "") == content:
                     relations_by_id[mem_id] = relations
                 continue
-            if not mem_id:
-                mem_id = str(uuid4())[:12]
 
             category = str(item.get("category") or "fact")
             contract_relations = []
@@ -1762,9 +1841,12 @@ class LanceDBStore:
                 source_id = str(edge.get("from") or edge.get("source_id") or "")
                 if source_id not in relations_by_id:
                     continue
+                target_id = str(edge.get("to") or edge.get("target_id") or "")
+                if target_id and not is_canonical_memory_id(target_id):
+                    continue
                 relations_by_id[source_id].append({
                     "type": str(edge.get("relation_type") or edge.get("type") or ""),
-                    "target_id": str(edge.get("to") or edge.get("target_id") or ""),
+                    "target_id": target_id,
                     "target": str(edge.get("target_label") or edge.get("target") or ""),
                 })
 
@@ -1796,6 +1878,7 @@ class LanceDBStore:
 
     def bulk_delete(self, memory_ids: list[str]) -> dict:
         """Delete multiple memories. Returns {deleted: N, errors: [...]}."""
+        memory_ids = [_require_memory_id(mid) for mid in memory_ids]
         self._fresh()
         deleted = 0
         errors = []
@@ -1846,9 +1929,13 @@ class LanceDBStore:
 
     def get_by_id(self, memory_id: str) -> dict | None:
         """Get a memory by ID (vector removed)."""
+        memory_id = _require_memory_id(memory_id)
+        memory_id_literal = _sql_literal(memory_id)
         self._fresh()
         try:
-            result = self._table.search().where(f"id = '{memory_id}'").limit(1).to_list()
+            result = self._table.search().where(
+                f"id = {memory_id_literal}"
+            ).limit(1).to_list()
             if not result:
                 return None
             mem = dict(result[0])
@@ -1860,7 +1947,7 @@ class LanceDBStore:
             mem["accessed_at"] = time.time()
             new_quality = self._compute_quality(mem)
             self._table.update(
-                f"id = '{memory_id}'",
+                f"id = {memory_id_literal}",
                 {"access_count": new_access,
                  "accessed_at": time.time(),
                  "quality": new_quality},
@@ -1873,9 +1960,12 @@ class LanceDBStore:
 
     def _get_by_id_raw(self, memory_id: str) -> dict | None:
         """Get a memory by ID INCLUDING vector (for similarity computation)."""
+        memory_id = _require_memory_id(memory_id)
         self._fresh()
         try:
-            result = self._table.search().where(f"id = '{memory_id}'").limit(1).to_list()
+            result = self._table.search().where(
+                f"id = {_sql_literal(memory_id)}"
+            ).limit(1).to_list()
             if not result:
                 return None
             mem = dict(result[0])
@@ -1950,7 +2040,7 @@ class LanceDBStore:
             )
 
             if category:
-                results = base.where(f"category = '{category}'").to_list()
+                results = base.where(f"category = {_sql_literal(category)}").to_list()
             else:
                 results = base.to_list()
         except Exception as e:
@@ -1977,7 +2067,7 @@ class LanceDBStore:
                 existing = self._get_by_id_raw(mid)
                 if existing:
                     self._table.update(
-                        f"id = '{mid}'",
+                        f"id = {_sql_literal(mid)}",
                         {"access_count": (existing.get("access_count", 0) or 0) + 1,
                          "accessed_at": now},
                     )
@@ -1992,7 +2082,7 @@ class LanceDBStore:
         try:
             base = self._table.search(query, query_type="fts").limit(top_k)
             if category:
-                rows = base.where(f"category = '{category}'").to_list()
+                rows = base.where(f"category = {_sql_literal(category)}").to_list()
             else:
                 rows = base.to_list()
         except Exception:
@@ -2149,12 +2239,13 @@ class LanceDBStore:
 
     def update_tags(self, memory_id: str, tags: list[str]) -> bool:
         """Replace tags for a memory."""
+        memory_id = _require_memory_id(memory_id)
         try:
             existing = self._get_by_id_raw(memory_id)
             if not existing:
                 return False
             self._table.update(
-                f"id = '{memory_id}'",
+                f"id = {_sql_literal(memory_id)}",
                 {"tags": json.dumps(tags), "updated_at": time.time()},
             )
             return True
@@ -2164,6 +2255,7 @@ class LanceDBStore:
     def bulk_tag(self, memory_ids: list[str], add_tags: list[str] | None = None,
                  remove_tags: list[str] | None = None) -> dict:
         """Add/remove tags from multiple memories."""
+        memory_ids = [_require_memory_id(mid) for mid in memory_ids]
         results = {"updated": 0, "errors": []}
         for mid in memory_ids:
             try:
@@ -2182,7 +2274,7 @@ class LanceDBStore:
                 if remove_tags:
                     current_tags.difference_update(remove_tags)
                 self._table.update(
-                    f"id = '{mid}'",
+                    f"id = {_sql_literal(mid)}",
                     {"tags": json.dumps(sorted(current_tags)), "updated_at": time.time()},
                 )
                 results["updated"] += 1
@@ -2538,6 +2630,7 @@ class LanceDBStore:
 
     def _rebuild_links_for(self, memory_id: str) -> None:
         """Build links for a single memory against all other memories."""
+        memory_id = _require_memory_id(memory_id)
         target = self._get_by_id_raw(memory_id)
         if not target:
             return
@@ -2555,16 +2648,22 @@ class LanceDBStore:
             if len(shared) >= 2:
                 linked.append(m["id"])
         linked = linked[:8]
-        self._table.update(f"id = '{memory_id}'", {"links": json.dumps(linked)})
+        self._table.update(
+            f"id = {_sql_literal(memory_id)}", {"links": json.dumps(linked)}
+        )
 
         for lid in linked:
-            row = self._table.search().where(f"id = '{lid}'").limit(1).to_list()
+            row = self._table.search().where(
+                f"id = {_sql_literal(lid)}"
+            ).limit(1).to_list()
             if row:
                 existing = json.loads(row[0].get("links", "[]") or "[]")
                 if memory_id not in existing:
                     existing = list(existing) + [memory_id]
                     existing = existing[:8]
-                    self._table.update(f"id = '{lid}'", {"links": json.dumps(existing)})
+                    self._table.update(
+                        f"id = {_sql_literal(lid)}", {"links": json.dumps(existing)}
+                    )
 
     def _rebuild_all_links(self) -> None:
         """Rebuild all entity-based links across the entire store."""
@@ -2585,16 +2684,19 @@ class LanceDBStore:
                 if len(shared) >= 2:
                     linked.append(other)
             linked = linked[:8]
-            self._table.update(f"id = '{mid}'", {"links": json.dumps(linked)})
+            self._table.update(
+                f"id = {_sql_literal(mid)}", {"links": json.dumps(linked)}
+            )
 
     def update_entities(self, memory_id: str, entities: list[str]) -> bool:
         """Update entities/tags for a memory. Rebuilds links."""
+        memory_id = _require_memory_id(memory_id)
         try:
             existing = self._get_by_id_raw(memory_id)
             if not existing:
                 return False
             self._table.update(
-                f"id = '{memory_id}'",
+                f"id = {_sql_literal(memory_id)}",
                 {"entities": json.dumps(entities), "updated_at": time.time()},
             )
             self._rebuild_all_links()

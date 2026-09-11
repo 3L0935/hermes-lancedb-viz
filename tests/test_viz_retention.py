@@ -10,6 +10,8 @@ from plugin.store import LanceDBStore
 
 
 ROOT = Path(__file__).resolve().parents[1]
+MEMORY_ID = "aaaaaaaa-aaa"
+CONFLICT_ID = "cccccccc-ccc"
 SPEC = importlib.util.spec_from_file_location("lancedb_viz_server", ROOT / "server" / "server.py")
 server = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(server)
@@ -21,7 +23,7 @@ class FakeStore:
 
     def get_conflicts(self, status="", limit=100, memory_id=""):
         self.calls.append((status, limit, memory_id))
-        return [{"id": "conflict-1", "status": status or "open"}]
+        return [{"id": CONFLICT_ID, "status": status or "open"}]
 
     def resolve_conflict(self, conflict_id, resolution_note, resolved_by="user"):
         self.calls.append((conflict_id, resolution_note, resolved_by))
@@ -55,28 +57,28 @@ class VizRetentionTests(unittest.TestCase):
 
     def test_conflicts_api_returns_flat_rows_with_filters(self):
         result = server.api_get_conflicts({
-            "status": "open", "limit": "25", "memory_id": "memory-1"
+            "status": "open", "limit": "25", "memory_id": MEMORY_ID
         })
 
-        self.assertEqual([{"id": "conflict-1", "status": "open"}], result)
-        self.assertEqual([("open", 25, "memory-1")], self.store.calls)
+        self.assertEqual([{"id": CONFLICT_ID, "status": "open"}], result)
+        self.assertEqual([("open", 25, MEMORY_ID)], self.store.calls)
 
         archived = server.api_get_conflicts({"status": "archived", "limit": "25"})
-        self.assertEqual([{"id": "conflict-1", "status": "archived"}], archived)
+        self.assertEqual([{"id": CONFLICT_ID, "status": "archived"}], archived)
 
     def test_conflict_resolution_api_is_auditable(self):
-        result = server.api_resolve_conflict("conflict-1", {
+        result = server.api_resolve_conflict(CONFLICT_ID, {
             "resolution_note": "approved after review",
             "resolved_by": "elo",
         })
 
-        self.assertEqual({"success": True, "conflict_id": "conflict-1"}, result)
+        self.assertEqual({"success": True, "conflict_id": CONFLICT_ID}, result)
         self.assertEqual([
-            ("conflict-1", "approved after review", "elo")
+            (CONFLICT_ID, "approved after review", "elo")
         ], self.store.calls)
         self.assertEqual(
-            "conflict-1",
-            server._parse_conflict_resolution_path("/api/conflicts/conflict-1/resolve"),
+            CONFLICT_ID,
+            server._parse_conflict_resolution_path(f"/api/conflicts/{CONFLICT_ID}/resolve"),
         )
 
     def test_stats_refreshes_mvcc_snapshot_and_db_size_is_on_demand(self):
@@ -158,13 +160,13 @@ class VizRetentionTests(unittest.TestCase):
                 server._store_instance = LanceDBStore(Path(tmp))
                 result = server.import_memories({"memories": [
                     {
-                        "id": "claim-a",
+                        "id": "aaaaaaaa-aaa",
                         "content": "Project:Alpha PORT = 7777 [Tier=2]",
                         "category": "project",
                         "relations": [],
                     },
                     {
-                        "id": "claim-b",
+                        "id": "bbbbbbbb-bbb",
                         "content": "Project:Alpha port=7778 [Tier=2]",
                         "category": "project",
                         "relations": [],
@@ -218,9 +220,11 @@ class VizRetentionTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 store = LanceDBStore(Path(tmp))
+                target_id = "aaaaaaaa-aaa"
+                source_id = "bbbbbbbb-bbb"
                 base_items = [
-                    {"id": "target", "content": "Project:Target state=active [Tier=2]", "category": "project"},
-                    {"id": "source", "content": "Project:Source state=active [Tier=2]", "category": "project"},
+                    {"id": target_id, "content": "Project:Target state=active [Tier=2]", "category": "project"},
+                    {"id": source_id, "content": "Project:Source state=active [Tier=2]", "category": "project"},
                 ]
                 store.import_records(base_items)
                 server._store_instance = store
@@ -229,13 +233,13 @@ class VizRetentionTests(unittest.TestCase):
                         dict(base_items[0], relations=[]),
                         dict(base_items[1], relations=[{
                             "type": "depends",
-                            "target_id": "target",
+                            "target_id": target_id,
                             "target": "Project:Target",
                         }]),
                     ],
                     "typed_edges": [{
-                        "from": "source",
-                        "to": "target",
+                        "from": source_id,
+                        "to": target_id,
                         "relation_type": "depends",
                         "target_label": "Project:Target",
                         "created_at": 1.0,
@@ -278,7 +282,7 @@ class VizRetentionTests(unittest.TestCase):
         server._store_instance = update_store
 
         result = server.update_memory({
-            "memory_id": "memory-1",
+            "memory_id": MEMORY_ID,
             "content": "Project:Alpha port=7778 [Tier=2]",
             "category": "project",
         })
@@ -287,7 +291,7 @@ class VizRetentionTests(unittest.TestCase):
         self.assertEqual("Project:Alpha port=7778 [Tier=2]", result["canonical_content"])
         self.assertEqual(1, len(update_store.calls))
         patch = update_store.calls[0]
-        self.assertEqual("memory-1", patch.memory_id)
+        self.assertEqual(MEMORY_ID, patch.memory_id)
         self.assertEqual(("port=7778",), patch.facts)
 
     def test_server_has_no_direct_table_update_and_graph_uses_memory_endpoint(self):

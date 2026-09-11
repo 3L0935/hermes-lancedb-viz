@@ -27,6 +27,58 @@ LANCEDB_PATH = HERMES_HOME / "lancedb"
 HOST = "127.0.0.1"
 PORT = 7778
 
+_CANONICAL_ID_RE = re.compile(
+    r"(?:[0-9a-f]{8}-[0-9a-f]{3}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
+)
+
+
+def _is_canonical_id(value) -> bool:
+    return isinstance(value, str) and _CANONICAL_ID_RE.fullmatch(value) is not None
+
+
+def _invalid_id(field: str = "memory_id") -> dict:
+    return {
+        "error": f"Invalid {field}",
+        "code": "invalid_memory_id",
+        "field": field,
+    }
+
+
+def _invalid_import_id(data: dict) -> str | None:
+    """Return the first non-canonical ID field in an import payload."""
+    for index, item in enumerate(data.get("memories", [])):
+        if not isinstance(item, dict):
+            continue
+        if item.get("id") and not _is_canonical_id(item["id"]):
+            return f"memories[{index}].id"
+        relations = item.get("relations", [])
+        if not isinstance(relations, list):
+            relations = []
+        for relation_index, relation in enumerate(relations):
+            if not isinstance(relation, dict):
+                continue
+            if relation.get("target_id") and not _is_canonical_id(relation["target_id"]):
+                return f"memories[{index}].relations[{relation_index}].target_id"
+    typed_edges = data.get("typed_edges", [])
+    if not isinstance(typed_edges, list):
+        typed_edges = []
+    for index, edge in enumerate(typed_edges):
+        if not isinstance(edge, dict):
+            continue
+        for name in ("from", "source_id", "to", "target_id"):
+            if edge.get(name) and not _is_canonical_id(edge[name]):
+                return f"typed_edges[{index}].{name}"
+    conflicts = data.get("conflicts", [])
+    if not isinstance(conflicts, list):
+        conflicts = []
+    for index, conflict in enumerate(conflicts):
+        if not isinstance(conflict, dict):
+            continue
+        for name in ("id", "memory_a_id", "memory_b_id"):
+            if conflict.get(name) and not _is_canonical_id(conflict[name]):
+                return f"conflicts[{index}].{name}"
+    return None
+
 
 def _parse_entities(val):
     """Parse entities field — handles both JSON array and CSV string formats."""
@@ -694,6 +746,8 @@ def delete_memory(memory_id: str) -> dict:
     """Delete a memory by ID."""
     if not memory_id:
         return {"error": "Missing memory_id"}
+    if not _is_canonical_id(memory_id):
+        return _invalid_id()
     try:
         store = _get_store()
         ok = store.delete(memory_id)
@@ -714,6 +768,8 @@ def update_memory(data: dict) -> dict:
 
     if not memory_id:
         return {"error": "Missing memory_id"}
+    if not _is_canonical_id(memory_id):
+        return _invalid_id()
 
     try:
         store = _get_store()
@@ -745,6 +801,8 @@ def update_memory_entities(data: dict) -> dict:
 
     if not memory_id:
         return {"error": "Missing memory_id"}
+    if not _is_canonical_id(memory_id):
+        return _invalid_id()
     if not isinstance(entities, list):
         return {"error": "entities must be a list"}
 
@@ -813,6 +871,9 @@ def import_memories(data: dict) -> dict:
     items = data.get("memories", [])
     if not isinstance(items, list) or not items:
         return {"error": "Missing or empty 'memories' array"}
+    invalid_field = _invalid_import_id(data)
+    if invalid_field:
+        return _invalid_id(invalid_field)
 
     try:
         store = _get_store()
@@ -840,6 +901,8 @@ def get_memory_detail(memory_id: str, threshold: float = 0.65) -> dict:
     """Get full detail for a single memory."""
     if not memory_id:
         return {"error": "Missing memory_id"}
+    if not _is_canonical_id(memory_id):
+        return _invalid_id()
     try:
         store = _get_store()
         memory = store.get_by_id(memory_id)
@@ -973,10 +1036,13 @@ def api_get_conflicts(params: dict) -> list:
         status = params.get("status", "")
         if status not in {"", "open", "resolved", "archived"}:
             return {"error": "status must be empty, open, resolved, or archived"}
+        memory_id = params.get("memory_id", "")
+        if memory_id and not _is_canonical_id(memory_id):
+            return _invalid_id()
         store = _get_store()
         return store.get_conflicts(
             status=status,
-            memory_id=params.get("memory_id", ""),
+            memory_id=memory_id,
             limit=min(max(int(params.get("limit", 100)), 1), 500),
         )
     except Exception as e:
@@ -989,6 +1055,8 @@ def api_resolve_conflict(conflict_id: str, data: dict) -> dict:
     resolved_by = str(data.get("resolved_by") or "user").strip()
     if not conflict_id:
         return {"error": "Missing conflict_id"}
+    if not _is_canonical_id(conflict_id):
+        return _invalid_id("conflict_id")
     if not resolution_note:
         return {"error": "Missing resolution_note"}
     if not resolved_by:
@@ -1039,6 +1107,8 @@ def api_update_memory(memory_id: str, data: dict) -> dict:
     """POST /api/memories/:id — update content/category/tags/quality/type."""
     if not memory_id:
         return {"error": "Missing memory_id"}
+    if not _is_canonical_id(memory_id):
+        return _invalid_id()
     try:
         store = _get_store()
         kwargs = {}
@@ -1064,6 +1134,8 @@ def api_access_memory(memory_id: str) -> dict:
     """POST /api/memories/:id/access — increment access count."""
     if not memory_id:
         return {"error": "Missing memory_id"}
+    if not _is_canonical_id(memory_id):
+        return _invalid_id()
     try:
         store = _get_store()
         memory = store.get_by_id(memory_id)
@@ -1079,6 +1151,8 @@ def api_bulk_delete(data: dict) -> dict:
     memory_ids = data.get("memory_ids", [])
     if not isinstance(memory_ids, list) or not memory_ids:
         return {"error": "Missing or empty memory_ids"}
+    if not all(_is_canonical_id(memory_id) for memory_id in memory_ids):
+        return _invalid_id("memory_ids")
     try:
         store = _get_store()
         result = store.bulk_delete(memory_ids)
@@ -1096,6 +1170,8 @@ def api_bulk_tag(data: dict) -> dict:
     remove_tags = data.get("remove_tags", [])
     if not isinstance(memory_ids, list) or not memory_ids:
         return {"error": "Missing or empty memory_ids"}
+    if not all(_is_canonical_id(memory_id) for memory_id in memory_ids):
+        return _invalid_id("memory_ids")
     try:
         store = _get_store()
         result = store.bulk_tag(memory_ids, add_tags=add_tags, remove_tags=remove_tags)
@@ -1111,6 +1187,8 @@ def api_bulk_type(data: dict) -> dict:
     mem_type = data.get("type", "")
     if not isinstance(memory_ids, list) or not memory_ids:
         return {"error": "Missing or empty memory_ids"}
+    if not all(_is_canonical_id(memory_id) for memory_id in memory_ids):
+        return _invalid_id("memory_ids")
     if not mem_type:
         return {"error": "Missing type"}
     try:
@@ -1182,10 +1260,14 @@ def api_merge_tags(data: dict) -> dict:
 # URL routing helpers
 # ---------------------------------------------------------------------------
 
-# Pattern for /api/memories/:id (captures the memory_id after /api/memories/)
-_MEM_ID_RE = re.compile(r"^/api/memories/([a-zA-Z0-9_-]+?)(?:/access)?$")
+# Pattern for /api/memories/:id (captures one canonical repository ID)
+_ID_PATTERN = (
+    r"(?:[0-9a-f]{8}-[0-9a-f]{3}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{12})"
+)
+_MEM_ID_RE = re.compile(rf"^/api/memories/({_ID_PATTERN})(?:/access)?$")
 _CONFLICT_RESOLVE_RE = re.compile(
-    r"^/api/conflicts/([a-zA-Z0-9_-]+)/resolve$"
+    rf"^/api/conflicts/({_ID_PATTERN})/resolve$"
 )
 
 
@@ -1295,6 +1377,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path.startswith("/static/"):
                 filepath = STATIC_DIR / path[8:]
                 self._serve_file(filepath)
+            elif path.startswith("/api/"):
+                self._send_json({"error": "Not found"}, 404)
             else:
                 self._serve_file(STATIC_DIR / "index.html", "text/html; charset=utf-8")
 
