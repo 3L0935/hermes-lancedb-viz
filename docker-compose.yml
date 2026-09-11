@@ -20,6 +20,8 @@ services:
       - ./static:/app/static:ro
       # Server script from repo (ro)
       - ./server/server.py:/app/server.py:ro
+      # Health/compaction module imported by server.py (ro)
+      - ./server/maintenance.py:/app/maintenance.py:ro
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:7777/')\" || exit 1"]
       interval: 30s

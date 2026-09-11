@@ -52,6 +52,9 @@ for file in store.py memory_contract.py __init__.py plugin.yaml; do
   run install -m 0644 "$ROOT/plugin/$file" "$RUNTIME/$file"
 done
 run install -m 0644 "$ROOT/server/server.py" "$VIZ/server.py"
+# server.py imports maintenance.py (health diagnostics + manual compaction);
+# without it the deployed viz fails to import and serves no new routes.
+run install -m 0644 "$ROOT/server/maintenance.py" "$VIZ/maintenance.py"
 for file in "$ROOT"/static/*; do
   run install -m 0644 "$file" "$VIZ/static/$(basename "$file")"
 done
