@@ -9,6 +9,20 @@ cd hermes-lancedb-viz
 
 You need Hermes Agent, Ollama, and Docker. See [docs/setup.md](docs/setup.md) for the full guide.
 
+## Reproducible tests from a clean checkout
+
+Hermes supplies the provider base classes and the tested Python environment.
+Replace `/path/to/hermes-agent` with that checkout, then run from this repository:
+
+```bash
+PYTHONPATH=$PWD:/path/to/hermes-agent /path/to/hermes-agent/venv/bin/python -m pytest -q tests
+node --check static/app.js
+node --check static/graph.js
+```
+
+The Python command is the release gate. Ollama, the visualizer container, and a
+live LanceDB database are not required; tests create temporary synthetic data.
+
 ## Project structure
 
 ```

@@ -6,6 +6,19 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeployContractTests(unittest.TestCase):
+    def test_checkout_test_command_and_memory_skill_match_contract_v2(self):
+        contributing = (ROOT / "CONTRIBUTING.md").read_text()
+        skill = (ROOT / "docs" / "skills" / "memory-writing.md").read_text()
+
+        self.assertIn(
+            "PYTHONPATH=$PWD:/path/to/hermes-agent /path/to/hermes-agent/venv/bin/python -m pytest -q tests",
+            contributing,
+        )
+        self.assertIn("facts=[", skill)
+        self.assertIn("tier=2", skill)
+        self.assertNotIn("lancedb_add(content=", skill)
+        self.assertNotIn('tier="2"', skill)
+
     def test_local_deploy_targets_primary_docker_viz(self):
         script = (ROOT / "scripts" / "deploy-local.sh").read_text()
         unit = (ROOT / "systemd" / "lancedb-viz.service").read_text()
