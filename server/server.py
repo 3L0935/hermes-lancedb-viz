@@ -201,6 +201,55 @@ def _contract_symbols(store):
     return MemoryPatch, parse_content
 
 
+def _contract_write_symbols(store):
+    """Resolve write/renderer symbols from the store's contract module."""
+    module = sys.modules.get(type(store).__module__)
+    if module and all(hasattr(module, name) for name in ("MemoryWrite", "render_content")):
+        return module.MemoryWrite, module.render_content
+    from plugin.memory_contract import MemoryWrite, render_content
+    return MemoryWrite, render_content
+
+
+def _contract_error_response(error: Exception) -> dict:
+    """Preserve actionable contract errors for the browser."""
+    if hasattr(error, "to_dict"):
+        detail = error.to_dict()
+        if isinstance(detail, dict):
+            return {"error": detail.get("message", str(error)), **detail}
+    return {"error": str(error)}
+
+
+def _version_conflict(current: dict, base_updated_at) -> dict | None:
+    """Return an optimistic-concurrency error when the displayed row is stale."""
+    if base_updated_at is None:
+        return None
+    try:
+        expected = float(base_updated_at)
+        actual = float(current.get("updated_at") or 0.0)
+    except (TypeError, ValueError):
+        return {
+            "error": "base_updated_at must be a number",
+            "code": "invalid_version",
+        }
+    if expected != actual:
+        return {
+            "error": "Memory changed since this editor was opened",
+            "code": "version_conflict",
+            "base_updated_at": expected,
+            "current_updated_at": actual,
+        }
+    return None
+
+
+def _structured_payload(data: dict) -> dict:
+    """Select the full bounded memory fields accepted by the contract."""
+    return {
+        key: data[key]
+        for key in ("domain", "subject", "facts", "tier", "category", "relations")
+        if key in data
+    }
+
+
 def _structured_update(store, memory_id: str, data: dict) -> dict:
     """Translate the viz's legacy content form into a strict typed patch."""
     MemoryPatch, parse_content = _contract_symbols(store)
@@ -221,7 +270,7 @@ def _structured_update(store, memory_id: str, data: dict) -> dict:
         })
     elif "category" in data:
         patch_data["category"] = data["category"]
-    for field in ("tags", "quality", "type", "relations"):
+    for field in ("domain", "subject", "facts", "tier", "tags", "quality", "type", "relations"):
         if field in data:
             patch_data[field] = data[field]
     return store.update_memory(MemoryPatch.from_mapping(patch_data))
@@ -993,6 +1042,23 @@ def get_memory_detail(memory_id: str, threshold: float = 0.65) -> dict:
 
         memory["linked_memories"] = links
         memory.pop("vector", None)
+        try:
+            _, parse_content = _contract_symbols(store)
+            parsed = parse_content(
+                memory.get("content"),
+                category=str(memory.get("category") or "fact"),
+                relations=memory.get("relations") or [],
+            )
+            memory["structured"] = {
+                "domain": parsed.domain,
+                "subject": parsed.subject,
+                "facts": list(parsed.facts),
+                "tier": parsed.tier,
+                "category": parsed.category,
+                "relations": [relation.to_dict() for relation in parsed.relations],
+            }
+        except Exception as error:
+            memory["structured_error"] = _contract_error_response(error)
         return memory
     except Exception as e:
         return {"error": str(e)}
@@ -1149,16 +1215,51 @@ def api_get_dashboard() -> dict:
 # POST handler helpers — new memviz endpoints
 # ---------------------------------------------------------------------------
 
-def api_update_memory(memory_id: str, data: dict) -> dict:
-    """POST /api/memories/:id — update content/category/tags/quality/type."""
+def api_preview_memory_update(memory_id: str, data: dict) -> dict:
+    """Validate and render one full structured edit without writing."""
     if not memory_id:
         return {"error": "Missing memory_id"}
     if not _is_canonical_id(memory_id):
         return _invalid_id()
     try:
         store = _get_store()
+        current = store.get_by_id(memory_id)
+        if not current:
+            return {"error": "Memory not found", "code": "memory_not_found"}
+        conflict = _version_conflict(current, data.get("base_updated_at"))
+        if conflict:
+            return conflict
+        MemoryWrite, render_content = _contract_write_symbols(store)
+        candidate = MemoryWrite.from_mapping(_structured_payload(data))
+        return {
+            "success": True,
+            "previous_content": str(current.get("content") or ""),
+            "canonical_content": render_content(candidate),
+            "base_updated_at": float(current.get("updated_at") or 0.0),
+            "budgets": {"memories": 1, "facts": 12, "relations": 20},
+        }
+    except Exception as error:
+        return _contract_error_response(error)
+
+def api_update_memory(memory_id: str, data: dict) -> dict:
+    """POST /api/memories/:id — apply a contract-validated memory patch."""
+    if not memory_id:
+        return {"error": "Missing memory_id"}
+    if not _is_canonical_id(memory_id):
+        return _invalid_id()
+    try:
+        store = _get_store()
+        current = store.get_by_id(memory_id)
+        if not current:
+            return {"error": "Memory not found", "code": "memory_not_found"}
+        conflict = _version_conflict(current, data.get("base_updated_at"))
+        if conflict:
+            return conflict
         kwargs = {}
-        for key in ("content", "category", "tags", "quality", "type"):
+        for key in (
+            "content", "domain", "subject", "facts", "tier", "category",
+            "relations", "tags", "quality", "type",
+        ):
             if key in data:
                 kwargs[key] = data[key]
         if not kwargs:
@@ -1171,10 +1272,11 @@ def api_update_memory(memory_id: str, data: dict) -> dict:
                 "message": f"Memory {memory_id} updated",
                 "canonical_content": result.get("canonical_content"),
                 "replaced_content": result.get("replaced_content"),
+                "base_updated_at": float(current.get("updated_at") or 0.0),
             }
         return {"error": "Memory not found or update failed"}
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception as error:
+        return _contract_error_response(error)
 
 def api_access_memory(memory_id: str) -> dict:
     """POST /api/memories/:id/access — increment access count."""
@@ -1311,27 +1413,28 @@ _ID_PATTERN = (
     r"(?:[0-9a-f]{8}-[0-9a-f]{3}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
     r"[0-9a-f]{4}-[0-9a-f]{12})"
 )
-_MEM_ID_RE = re.compile(rf"^/api/memories/({_ID_PATTERN})(?:/access)?$")
+_MEM_ID_RE = re.compile(rf"^/api/memories/({_ID_PATTERN})$")
 _CONFLICT_RESOLVE_RE = re.compile(
     rf"^/api/conflicts/({_ID_PATTERN})/resolve$"
 )
 
 
 def _parse_memories_id_path(path: str):
-    """Match /api/memories/:id or /api/memories/:id/access.
+    """Match /api/memories/:id and its bounded action suffixes.
     Returns (memory_id, sub_action) or None.
-    sub_action is '' for /api/memories/:id, 'access' for /api/memories/:id/access
+    sub_action is '', 'access', or 'preview'.
     """
-    # Check /api/memories/:id/access first
-    if path.endswith("/access"):
-        base = path[:-7]  # strip /access
-        m = _MEM_ID_RE.match(base)
-        if m:
-            return m.group(1), "access"
-    # Then check /api/memories/:id
-    m = _MEM_ID_RE.match(path)
+    sub_action = ""
+    base = path
+    for suffix in ("access", "preview"):
+        marker = f"/{suffix}"
+        if path.endswith(marker):
+            base = path[:-len(marker)]
+            sub_action = suffix
+            break
+    m = _MEM_ID_RE.match(base)
     if m:
-        return m.group(1), ""
+        return m.group(1), sub_action
     return None
 
 
@@ -1483,6 +1586,8 @@ class Handler(BaseHTTPRequestHandler):
                 if sub == "access":
                     # POST /api/memories/:id/access
                     self._send_json(api_access_memory(mem_id))
+                elif sub == "preview":
+                    self._send_json(api_preview_memory_update(mem_id, data))
                 else:
                     # POST /api/memories/:id — update memory
                     self._send_json(api_update_memory(mem_id, data))

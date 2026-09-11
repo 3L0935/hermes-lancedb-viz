@@ -46,7 +46,16 @@ class FakeUpdateStore:
         self.calls = []
 
     def _get_by_id_raw(self, memory_id):
-        return {"id": memory_id, "category": "project"}
+        return {
+            "id": memory_id,
+            "content": "Project:Alpha port=7777 [Tier=2]",
+            "category": "project",
+            "relations": [],
+            "updated_at": 10.0,
+        }
+
+    def get_by_id(self, memory_id):
+        return self._get_by_id_raw(memory_id)
 
     def update_memory(self, memory_patch):
         self.calls.append(memory_patch)
@@ -349,6 +358,53 @@ class VizRetentionTests(unittest.TestCase):
         patch = update_store.calls[0]
         self.assertEqual(MEMORY_ID, patch.memory_id)
         self.assertEqual(("port=7778",), patch.facts)
+
+    def test_structured_preview_is_read_only_and_returns_canonical_diff(self):
+        update_store = FakeUpdateStore()
+        server._store_instance = update_store
+
+        result = server.api_preview_memory_update(MEMORY_ID, {
+            "domain": "Project",
+            "subject": "Alpha",
+            "facts": ["port = 7778", "owner=elo"],
+            "tier": 1,
+            "category": "project",
+            "relations": [{"type": "depends", "target_id": "bbbbbbbb-bbb"}],
+            "base_updated_at": 10.0,
+        })
+
+        self.assertTrue(result["success"], result)
+        self.assertEqual("Project:Alpha port=7778 ::fact:: owner=elo [Tier=1]", result["canonical_content"])
+        self.assertEqual("Project:Alpha port=7777 [Tier=2]", result["previous_content"])
+        self.assertEqual(10.0, result["base_updated_at"])
+        self.assertEqual([], update_store.calls)
+
+    def test_structured_update_rejects_visible_version_conflict_before_write(self):
+        update_store = FakeUpdateStore()
+        server._store_instance = update_store
+
+        result = server.api_update_memory(MEMORY_ID, {
+            "domain": "Project", "subject": "Alpha", "facts": ["port=7778"],
+            "tier": 2, "category": "project", "relations": [],
+            "base_updated_at": 9.0,
+        })
+
+        self.assertEqual("version_conflict", result["code"])
+        self.assertEqual(10.0, result["current_updated_at"])
+        self.assertEqual([], update_store.calls)
+
+    def test_structured_editor_contract_exposes_all_bounded_fields_and_diff(self):
+        html = (ROOT / "static" / "index.html").read_text()
+        graph = (ROOT / "static" / "graph.js").read_text()
+
+        for field in ("edit-domain", "edit-subject", "edit-facts", "edit-tier", "edit-category", "edit-relations"):
+            self.assertIn(field, graph)
+        self.assertIn("/preview", graph)
+        self.assertIn("canonical-preview", graph)
+        self.assertIn("version-conflict", graph)
+        self.assertIn("MAX_EDITOR_FACTS = 12", graph)
+        self.assertIn("MAX_EDITOR_RELATIONS = 20", graph)
+        self.assertIn('id="graph-canvas"', html)
 
     def test_server_has_no_direct_table_update_and_graph_uses_memory_endpoint(self):
         source = (ROOT / "server" / "server.py").read_text()

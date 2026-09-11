@@ -492,3 +492,19 @@ input[type=range] { height: 4px; accent-color: var(--indigo); cursor: pointer; }
   #nav { display: none; }
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
 }
+/* Structured editor: bounded fields and explicit old/new preview. */
+.structured-editor { display:grid; gap:9px; }
+.structured-editor label { display:grid; gap:4px; color:var(--muted); font-size:10px; }
+.structured-editor input, .structured-editor select, .structured-editor textarea {
+  width:100%; box-sizing:border-box; padding:7px; border:1px solid var(--border);
+  border-radius:6px; background:#0a0a16; color:#e2e8f0; font:11px 'Fira Code', monospace;
+}
+.structured-editor textarea { min-height:76px; resize:vertical; }
+.editor-row { display:grid; grid-template-columns:1fr 2fr; gap:8px; }
+.editor-heading { margin-bottom:8px; color:var(--accent); }
+.edit-diff { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; }
+.edit-diff > div { min-width:0; }
+.edit-diff span { color:var(--muted); font-size:10px; }
+.edit-diff pre { min-height:70px; max-height:180px; overflow:auto; white-space:pre-wrap; word-break:break-word; margin:4px 0 0; padding:8px; border:1px solid var(--border); border-radius:6px; background:#080812; color:#cbd5e1; font:10px/1.5 'Fira Code', monospace; }
+.version-conflict { margin-top:9px; padding:8px; border:1px solid rgba(248,113,113,.45); border-radius:6px; color:#fca5a5; background:rgba(127,29,29,.16); font-size:11px; }
+.version-conflict[hidden], .edit-diff[hidden] { display:none; }

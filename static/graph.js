@@ -9,6 +9,8 @@ let network = null;
 let allData = { nodes: [], edges: [], typed_edges: [] };
 let selectedNodeId = null;
 let highlightedTypedEdges = new Set(); // node IDs highlighted for typed relations
+const MAX_EDITOR_FACTS = 12;
+const MAX_EDITOR_RELATIONS = 20;
 
 // Cat colors — neon cyberpunk, dark cores with blazing borders
 const catColors = {
@@ -281,14 +283,14 @@ function openSidebar(nodeId) {
       const typedEdgesCount = nodeTypedEdges.length;
       const nEdges = nodeVecEdges.length;
 
-      renderSidebarContent(content, nodeId, fullContent, category, catLabel, dateStr, fullEntities, linkedMemories, nodeTypedEdges, nodeVecEdges, quality, accessCount, typedEdgesCount, nEdges);
+      renderSidebarContent(content, nodeId, fullContent, category, catLabel, dateStr, fullEntities, linkedMemories, nodeTypedEdges, nodeVecEdges, quality, accessCount, typedEdgesCount, nEdges, data.structured || null, data.updated_at);
     })
     .catch(() => {
       renderSidebarContent(content, nodeId, n.title || n.label || '', n.category || 'fact', cat, dateStr, n.entities || [], [], [], []);
     });
 }
 
-function renderSidebarContent(content, nodeId, fullContent, category, catLabel, dateStr, entities, linkedMemories, typedEdges, vectorEdges, quality, accessCount, typedEdgesCount, nEdges) {
+function renderSidebarContent(content, nodeId, fullContent, category, catLabel, dateStr, entities, linkedMemories, typedEdges, vectorEdges, quality, accessCount, typedEdgesCount, nEdges, structured, updatedAt) {
   // ─── Stats bar ───
   const n = allData.nodes.find(x => x.id === nodeId);
   const ageHours = n && n.created_at ? (Date.now()/1000 - n.created_at) / 3600 : null;
@@ -428,6 +430,8 @@ function renderSidebarContent(content, nodeId, fullContent, category, catLabel, 
   content.dataset.fullContent = fullContent;
   content.dataset.category = category;
   content.dataset.entities = JSON.stringify(entities);
+  content.dataset.structured = JSON.stringify(structured || {});
+  content.dataset.updatedAt = String(updatedAt || 0);
 }
 
 function renderHubSidebar(content, hubId, hubNode) {
@@ -472,66 +476,89 @@ function renderHubSidebar(content, hubId, hubNode) {
 function toggleEdit() {
   const content = document.getElementById('sidebar-content');
   const nodeId = content.dataset.nodeId;
-  const currentContent = content.dataset.fullContent;
-  const currentCat = content.dataset.category;
-  let currentEntities = [];
-  try { currentEntities = JSON.parse(content.dataset.entities || '[]'); } catch(e) {}
-
-  const entityTags = currentEntities.map(e =>
-    '<span class="entity-tag-edit" onclick="removeEntityEdit(\'' + escapeJsString(e) + '\')">' + escapeHtml(e) + ' ✕</span>'
-  ).join('');
+  let current = {};
+  try { current = JSON.parse(content.dataset.structured || '{}'); } catch(e) {}
+  if (!current.domain) {
+    content.innerHTML = '<div class="version-conflict">This legacy row cannot be edited structurally until its format is reviewed.</div>' +
+      '<div class="detail-actions"><button class="btn-focus" onclick="openSidebar(\'' + escapeJsString(nodeId) + '\')">Back</button></div>';
+    return;
+  }
+  const relations = JSON.stringify(current.relations || [], null, 2);
+  const categories = ['fact','user_pref','project','tech','correction','decision','insight','reference','pattern','question'];
 
   content.innerHTML =
-    '<div class="detail-meta" style="margin-bottom:8px;">Edit memory</div>' +
-    '<textarea id="edit-content" style="width:100%;min-height:80px;background:#0a0a16;border:1px solid #1e1e3a;border-radius:6px;color:#e2e8f0;padding:8px;font-size:12px;font-family:\'Fira Sans\',sans-serif;resize:vertical;">' + escapeHtml(currentContent) + '</textarea>' +
-    '<div style="margin:8px 0;"><select id="edit-category" style="width:100%;padding:6px;border-radius:6px;border:1px solid #1e1e3a;background:#0c0c1a;color:#e2e8f0;font-size:12px;font-family:\'Fira Sans\',sans-serif;">' +
-      ['fact','user_pref','project','tech','correction','decision','insight','reference','pattern','question']
-        .map(c => '<option value="' + c + '" ' + (currentCat === c ? 'selected' : '') + '>' + (catLabels[c] || c) + '</option>').join('') +
-    '</select></div>' +
-    '<div id="edit-entities-container">' +
-      '<div class="detail-meta">Entities (click to remove)</div>' +
-      '<div id="edit-entities-tags">' + (entityTags || '<span style="color:#475569;font-size:11px;">No entities</span>') + '</div>' +
-      '<div style="display:flex;gap:6px;margin-top:8px;">' +
-        '<input id="edit-entities-input" type="text" placeholder="Add entity..." style="flex:1;" onkeydown="if(event.key===\'Enter\')addEntityEdit()"/>' +
-        '<button class="btn-focus" onclick="addEntityEdit()" style="padding:6px 10px;">+</button>' +
-      '</div>' +
+    '<div class="detail-meta editor-heading">Structured memory · preview required</div>' +
+    '<div class="structured-editor" oninput="invalidateEditPreview()">' +
+      '<label>Domain<input id="edit-domain" value="' + escapeHtmlAttr(current.domain) + '"></label>' +
+      '<label>Subject<input id="edit-subject" value="' + escapeHtmlAttr(current.subject) + '"></label>' +
+      '<label>Facts · one per line (max ' + MAX_EDITOR_FACTS + ')<textarea id="edit-facts">' + escapeHtml((current.facts || []).join('\n')) + '</textarea></label>' +
+      '<div class="editor-row"><label>Tier<select id="edit-tier">' + [1,2,3].map(t => '<option value="' + t + '" ' + (current.tier === t ? 'selected' : '') + '>' + t + '</option>').join('') + '</select></label>' +
+      '<label>Category<select id="edit-category">' + categories.map(c => '<option value="' + c + '" ' + (current.category === c ? 'selected' : '') + '>' + escapeHtml(catLabels[c] || c) + '</option>').join('') + '</select></label></div>' +
+      '<label>Relations JSON (max ' + MAX_EDITOR_RELATIONS + ')<textarea id="edit-relations">' + escapeHtml(relations) + '</textarea></label>' +
     '</div>' +
+    '<div id="version-conflict" class="version-conflict" hidden></div>' +
+    '<div id="edit-diff" class="edit-diff" hidden><div><span>Old</span><pre id="previous-preview"></pre></div><div><span>Canonical new</span><pre id="canonical-preview"></pre></div></div>' +
     '<div class="detail-actions" style="margin-top:12px;">' +
-      '<button class="btn-save" onclick="saveEdit(\'' + escapeJsString(nodeId) + '\')">Save</button>' +
+      '<button class="btn-focus" onclick="previewEdit(\'' + escapeJsString(nodeId) + '\')">Preview</button>' +
+      '<button id="save-edit" class="btn-save" onclick="saveEdit(\'' + escapeJsString(nodeId) + '\')" disabled>Save canonical</button>' +
       '<button class="btn-focus" onclick="openSidebar(\'' + escapeJsString(nodeId) + '\')">Cancel</button>' +
     '</div>';
+  content.dataset.previewReady = '0';
 }
 
-function addEntityEdit() {
-  const input = document.getElementById('edit-entities-input');
-  const val = input.value.trim().toLowerCase();
-  if (!val) return;
-  document.getElementById('edit-entities-tags').innerHTML += '<span class="entity-tag-edit" onclick="this.remove()">' + escapeHtml(val) + ' ✕</span>';
-  input.value = '';
+function invalidateEditPreview() {
+  const content = document.getElementById('sidebar-content');
+  content.dataset.previewReady = '0';
+  const save = document.getElementById('save-edit');
+  if (save) save.disabled = true;
 }
 
-function removeEntityEdit(entity) {
-  document.querySelectorAll('.entity-tag-edit').forEach(el => { if (el.textContent.includes(entity)) el.remove(); });
+function editorPayload() {
+  const facts = document.getElementById('edit-facts').value.split('\n').map(v => v.trim()).filter(Boolean);
+  const relations = JSON.parse(document.getElementById('edit-relations').value || '[]');
+  if (facts.length > MAX_EDITOR_FACTS) throw new Error('At most ' + MAX_EDITOR_FACTS + ' facts are allowed.');
+  if (!Array.isArray(relations) || relations.length > MAX_EDITOR_RELATIONS) throw new Error('Relations must be an array of at most ' + MAX_EDITOR_RELATIONS + ' items.');
+  return {
+    domain: document.getElementById('edit-domain').value,
+    subject: document.getElementById('edit-subject').value,
+    facts: facts,
+    tier: Number(document.getElementById('edit-tier').value),
+    category: document.getElementById('edit-category').value,
+    relations: relations,
+    base_updated_at: Number(document.getElementById('sidebar-content').dataset.updatedAt || 0),
+  };
+}
+
+function showEditError(data) {
+  const error = document.getElementById('version-conflict');
+  error.hidden = false;
+  error.textContent = data.code === 'version_conflict'
+    ? 'Version conflict: the memory changed. Reopen it before editing.'
+    : (data.error || 'Invalid structured memory.');
+}
+
+async function previewEdit(nodeId) {
+  try {
+    const response = await fetch('/api/memories/' + nodeId + '/preview', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(editorPayload())});
+    const data = await response.json();
+    if (data.error) { showEditError(data); return; }
+    document.getElementById('version-conflict').hidden = true;
+    document.getElementById('previous-preview').textContent = data.previous_content || '';
+    document.getElementById('canonical-preview').textContent = data.canonical_content || '';
+    document.getElementById('edit-diff').hidden = false;
+    document.getElementById('sidebar-content').dataset.previewReady = '1';
+    document.getElementById('save-edit').disabled = false;
+  } catch(e) { showEditError({error: e.message}); }
 }
 
 async function saveEdit(nodeId) {
-  const newContent = document.getElementById('edit-content').value.trim();
-  const newCategory = document.getElementById('edit-category').value;
-  if (!newContent) return;
-  const entityTags = [];
-  document.querySelectorAll('#edit-entities-tags .entity-tag-edit').forEach(el => {
-    const name = el.textContent.replace('✕', '').trim().toLowerCase();
-    if (name) entityTags.push(name);
-  });
+  if (document.getElementById('sidebar-content').dataset.previewReady !== '1') return;
   try {
-    const r1 = await fetch('/api/memories/' + nodeId, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({content: newContent, category: newCategory}) });
-    const d1 = await r1.json();
-    if (d1.error) { alert('Erreur: ' + d1.error); return; }
-    const r2 = await fetch('/api/update_entities', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({memory_id: nodeId, entities: entityTags}) });
-    const d2 = await r2.json();
-    if (d2.error) console.warn('Entity update:', d2.error);
+    const response = await fetch('/api/memories/' + nodeId, {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(editorPayload())});
+    const data = await response.json();
+    if (data.error) { showEditError(data); invalidateEditPreview(); return; }
     loadGraph(); openSidebar(nodeId);
-  } catch(e) { alert('Erreur réseau: ' + e); }
+  } catch(e) { showEditError({error: e.message}); }
 }
 
 function closeSidebar() {
