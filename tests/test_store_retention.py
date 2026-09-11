@@ -441,6 +441,11 @@ class StoreRetentionTests(unittest.TestCase):
 
     def test_router_is_local_and_deterministic(self):
         self.assertEqual("lexical", route_search_mode('"exact phrase"'))
+        self.assertEqual("lexical", route_search_mode("12345678-123"))
+        self.assertEqual(
+            "lexical",
+            route_search_mode("12345678-1234-1234-1234-123456789abc"),
+        )
         self.assertEqual("graph", route_search_mode("Comment Project:Beta dépend de Project:Alpha ?"))
         self.assertEqual("hybrid", route_search_mode("configuration audio de mon PC"))
 
@@ -460,6 +465,68 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertEqual(["memory-1"], [result["id"] for result in results])
         self.assertEqual("hybrid", results[0]["search_mode"])
         self.assertEqual("lexical_empty", results[0]["routing_fallback"])
+
+    def test_search_rejects_zero_embedding_before_vector_query(self):
+        self.add("Project:Alpha state=active [Tier=2]")
+        vector_searches = []
+        original_search = self.store._table.search
+
+        def tracked_search(*args, **kwargs):
+            if kwargs.get("query_type") == "hybrid":
+                vector_searches.append(True)
+            return original_search(*args, **kwargs)
+
+        self.store._embed = lambda _query: np.zeros(768, dtype=np.float32)
+        with patch.object(self.store._table, "search", side_effect=tracked_search):
+            with self.assertRaises(MemoryEmbeddingError) as caught:
+                self.store.search("semantic query", mode="hybrid")
+
+        self.assertEqual("embedding_failed", caught.exception.issue.code)
+        self.assertEqual("query", caught.exception.issue.field)
+        self.assertEqual([], vector_searches)
+
+    def test_search_normalizes_embedding_before_vector_query(self):
+        vector_norms = []
+        original_search = self.store._table.search
+
+        def tracked_search(*args, **kwargs):
+            query = original_search(*args, **kwargs)
+            if kwargs.get("query_type") != "hybrid":
+                return query
+            original_vector = query.vector
+
+            def tracked_vector(vector):
+                vector_norms.append(float(np.linalg.norm(vector)))
+                return original_vector(vector)
+
+            query.vector = tracked_vector
+            return query
+
+        self.store._embed = lambda _query: np.full(768, 3.0, dtype=np.float32)
+        with patch.object(self.store._table, "search", side_effect=tracked_search):
+            self.store.search("semantic query", mode="hybrid")
+
+        self.assertEqual(1, len(vector_norms))
+        self.assertAlmostEqual(1.0, vector_norms[0], places=6)
+
+    def test_generated_and_uuid_ids_use_exact_id_lookup_without_embedding(self):
+        generated_id = self.add("Project:Generated state=active [Tier=2]")
+        uuid_id = "12345678-1234-1234-1234-123456789abc"
+        imported = self.store.import_records([{
+            "id": uuid_id,
+            "content": "Project:Imported state=active [Tier=2]",
+            "category": "project",
+        }])
+        self.assertEqual(1, imported["imported"])
+        self.store._embed = lambda _query: (_ for _ in ()).throw(
+            AssertionError("exact ID lookup must not embed")
+        )
+
+        for memory_id in (generated_id, uuid_id):
+            with self.subTest(memory_id=memory_id):
+                results = self.store.search(memory_id, mode="auto")
+                self.assertEqual([memory_id], [result["id"] for result in results])
+                self.assertEqual("id", results[0]["match_field"])
 
     def test_graph_depth_zero_uses_full_top_k_for_seeds(self):
         requested = []

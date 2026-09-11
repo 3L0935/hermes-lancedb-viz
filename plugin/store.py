@@ -52,15 +52,25 @@ def _serialized_mutation(method):
 
 
 class MemoryEmbeddingError(RuntimeError):
-    """Retryable failure raised before a strict write reaches LanceDB."""
+    """Retryable failure raised before a strict write or vector search."""
 
     retryable = True
 
-    def __init__(self, detail: str = "embedding service returned no usable vector"):
+    def __init__(
+        self,
+        detail: str = "embedding service returned no usable vector",
+        *,
+        field: str = "content",
+    ):
+        message = (
+            "search was not run because embedding failed"
+            if field == "query"
+            else "memory was not written because embedding failed"
+        )
         self.issue = ContractIssue(
             code="embedding_failed",
-            field="content",
-            message="memory was not written because embedding failed",
+            field=field,
+            message=message,
             received=detail,
             expected="a non-zero 768-dimensional embedding",
         )
@@ -309,7 +319,7 @@ def route_search_mode(query: str) -> str:
     lexical_markers = ("exact", "verbatim", "littéral", "literal")
     if (
         (len(text) >= 2 and text[0] == text[-1] == '"')
-        or re.search(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b", lower)
+        or is_canonical_memory_id(lower)
         or re.search(r"(?:^|\s)(?:~/|/)[^\s]+", text)
         or any(re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", lower) for marker in lexical_markers)
     ):
@@ -1158,14 +1168,17 @@ class LanceDBStore:
             logger.warning("Embedding failed: %s — returning zero vector", e)
             return np.zeros(768, dtype=np.float32)
 
-    def _require_embedding(self, text: str) -> np.ndarray:
-        """Return a usable embedding or fail before any memory row is written."""
+    def _require_embedding(self, text: str, *, field: str = "content") -> np.ndarray:
+        """Return a normalized embedding or fail before vector use."""
         vector = np.asarray(self._embed(text), dtype=np.float32)
         if vector.shape != (768,) or not np.isfinite(vector).all():
-            raise MemoryEmbeddingError(f"invalid vector shape or values: {vector.shape}")
+            raise MemoryEmbeddingError(
+                f"invalid vector shape or values: {vector.shape}",
+                field=field,
+            )
         norm = float(np.linalg.norm(vector))
         if norm < 0.001:
-            raise MemoryEmbeddingError("zero vector")
+            raise MemoryEmbeddingError("zero vector", field=field)
         return vector / norm
 
     # -----------------------------------------------------------------------
@@ -2138,9 +2151,9 @@ class LanceDBStore:
 
     def _search_hybrid(self, query: str, top_k: int = 10,
                        category: str | None = None) -> list[dict]:
-        """Run LanceDB BM25/vector hybrid retrieval."""
+        """Run hybrid retrieval or raise before querying on an invalid vector."""
         self._fresh()
-        vector = self._embed(query)
+        vector = self._require_embedding(query, field="query")
         try:
             # Hybrid: vector + BM25 RRF fusion
             base = (
@@ -2261,6 +2274,18 @@ class LanceDBStore:
     def search(self, query: str, top_k: int = 10, category: str | None = None,
                mode: str = "auto", relation_depth: int = 1) -> list[dict]:
         """Search locally with deterministic routing and optional one-hop expansion."""
+        exact_id = (query or "").strip().strip('"')
+        if is_canonical_memory_id(exact_id):
+            memory = self._get_by_id_raw(exact_id)
+            if not memory or (category and memory.get("category") != category):
+                return []
+            memory.pop("vector", None)
+            memory["score"] = 1.0
+            memory["retrieval_source"] = "direct"
+            memory["search_mode"] = "lexical"
+            memory["match_field"] = "id"
+            return [memory]
+
         selected_mode = route_search_mode(query) if mode == "auto" else mode
         if selected_mode not in {"hybrid", "lexical", "graph"}:
             selected_mode = "hybrid"

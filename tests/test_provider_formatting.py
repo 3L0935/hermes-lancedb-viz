@@ -11,6 +11,7 @@ class RecordingStore:
         self.added = None
         self.updated = None
         self.add_error = None
+        self.search_error = None
 
     def add_memory(self, memory):
         self.added = memory
@@ -36,6 +37,11 @@ class RecordingStore:
         }
 
     def get_conflicts(self, **_kwargs):
+        return []
+
+    def search(self, *_args, **_kwargs):
+        if self.search_error:
+            raise self.search_error
         return []
 
 
@@ -142,6 +148,22 @@ class ProviderFormattingTests(unittest.TestCase):
         self.assertFalse(payload["success"])
         self.assertTrue(payload["retryable"])
         self.assertEqual("embedding_failed", payload["error"]["code"])
+
+    def test_search_embedding_failure_is_machine_readable(self):
+        self.store.search_error = MemoryEmbeddingError(
+            "zero vector",
+            field="query",
+        )
+
+        payload = json.loads(self.provider.handle_tool_call(
+            "lancedb_search",
+            {"query": "semantic query"},
+        ))
+
+        self.assertFalse(payload["success"])
+        self.assertTrue(payload["retryable"])
+        self.assertEqual("embedding_failed", payload["error"]["code"])
+        self.assertEqual("query", payload["error"]["field"])
 
     def test_update_handler_uses_typed_patch_and_echoes_replaced_content(self):
         payload = json.loads(self.provider.handle_tool_call(

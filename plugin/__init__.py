@@ -60,6 +60,7 @@ _SEARCH_SCHEMA = {
         "access frequency + links + freshness) and relations (typed links "
         "to related memories). Follow relations of top results for "
         "additional context. "
+        "Embedding failures return a retryable embedding_failed error instead of results. "
         "Use this before answering about the user's projects, preferences, "
         "or past decisions — avoids asking questions already stored."
     ),
@@ -505,7 +506,7 @@ class LanceDBMemoryProvider(MemoryProvider):
                 "results": results,
             }, ensure_ascii=False, default=str)
         except Exception as e:
-            return tool_error(str(e))
+            return _write_error(e)
 
     def _handle_add(self, args: dict) -> str:
         try:
