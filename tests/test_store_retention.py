@@ -1,6 +1,8 @@
 import tempfile
 import threading
 import unittest
+import builtins
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -74,6 +76,34 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertGreaterEqual(len(selected_columns), 2)
         self.assertTrue(all("vector" not in columns for columns in selected_columns))
         self.assertTrue(all("content" in columns for columns in selected_columns))
+
+    def test_projection_reports_no_data_dependency_and_runtime_error_separately(self):
+        self.assertEqual("no_data", self.store.get_projection()["state"])
+        for index in range(3):
+            self.add(f"Project:Projection{index} state=active [Tier=2]")
+
+        original_import = builtins.__import__
+
+        def missing_umap(name, *args, **kwargs):
+            if name == "umap":
+                raise ImportError("missing")
+            return original_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=missing_umap):
+            missing = self.store.get_projection()
+        self.assertEqual("dependency_missing", missing["state"])
+
+        class BrokenUmap:
+            def __init__(self, **_kwargs):
+                pass
+
+            def fit_transform(self, _matrix):
+                raise RuntimeError("projection exploded")
+
+        with patch.dict(sys.modules, {"umap": type("UmapModule", (), {"UMAP": BrokenUmap})()}):
+            failed = self.store.get_projection()
+        self.assertEqual("projection_failed", failed["state"])
+        self.assertIn("projection exploded", failed["error"])
 
     def test_reopen_reuses_current_fts_index_without_version_commit(self):
         self.add("Project:Alpha state=active [Tier=2]")

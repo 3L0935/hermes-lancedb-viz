@@ -412,6 +412,44 @@ async function loadReviewInbox() {
   }
 }
 
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KiB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MiB';
+}
+
+async function loadHealth() {
+  const button = document.getElementById('health-scan');
+  const container = document.getElementById('health-container');
+  button.disabled = true;
+  button.textContent = 'Inspecting...';
+  try {
+    const data = await fetch(API + '/health').then(response => response.json());
+    if (data.error) throw new Error(data.error);
+    const tableRows = Object.entries(data.tables || {}).map(([name, table]) =>
+      '<tr><td>' + escapeHtml(name) + '</td><td>' + escapeHtml(table.state) + '</td><td>' + escapeHtml(table.rows ?? '—') + '</td><td>' + escapeHtml(table.current_version ?? '—') + ' / ' + escapeHtml(table.versions ?? '—') + '</td><td>' + escapeHtml(table.fragments ?? '—') + '</td></tr>'
+    ).join('');
+    const fts = data.fts || {};
+    const ollama = data.ollama || {};
+    const storage = data.storage || {};
+    const estimate = data.maintenance_estimate || {};
+    const pipeline = data.pipeline || {};
+    container.innerHTML =
+      '<div class="health-card"><span>Pipeline</span><b>' + escapeHtml(pipeline.model || 'unknown') + '</b><small>' + escapeHtml((pipeline.dimension || '?') + 'd · contract v' + (pipeline.version || '?') + ' · ' + (pipeline.metric || '?')) + '</small></div>' +
+      '<div class="health-card"><span>FTS</span><b class="health-' + escapeHtmlAttr(fts.state || 'missing') + '">' + escapeHtml(fts.state || 'missing') + '</b><small>' + escapeHtml(fts.num_unindexed_rows ?? 'unknown') + ' unindexed rows</small></div>' +
+      '<div class="health-card"><span>Storage</span><b>' + formatBytes(storage.disk_bytes) + '</b><small>' + formatBytes(storage.useful_bytes) + ' useful · ' + formatBytes(storage.history_bytes) + ' history</small></div>' +
+      '<div class="health-card"><span>Ollama</span><b class="health-' + escapeHtmlAttr(ollama.state || 'error') + '">' + escapeHtml(ollama.state || 'error') + '</b><small>' + escapeHtml(ollama.error || ('HTTP ' + (ollama.status || '?'))) + '</small></div>' +
+      '<div class="health-table"><table class="data-table"><thead><tr><th>Table</th><th>State</th><th>Rows</th><th>Version / history</th><th>Fragments</th></tr></thead><tbody>' + tableRows + '</tbody></table></div>' +
+      '<div class="health-estimate">Before maintenance: backup ' + formatBytes(estimate.backup_bytes) + ' · estimated DB after ' + formatBytes(estimate.estimated_after_bytes) + ' · reclaimable ' + formatBytes(estimate.estimated_reclaimable_bytes) + ' (estimate only)</div>';
+  } catch(e) {
+    container.innerHTML = '<div class="error-state">Health inspection failed: ' + escapeHtml(e.message) + '</div>';
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Inspect local health';
+  }
+}
+
 // Embeddings (UMAP projection)
 // ═══════════════════════════════════════════════
 
@@ -428,8 +466,19 @@ async function loadEmbedding() {
 
   try {
     const r = await fetch(API + '/projection?n_neighbors=' + nNeighbors + '&min_dist=' + minDist);
-    let points = await r.json();
-    if (points && !Array.isArray(points) && Array.isArray(points.points)) points = points.points;
+    const projection = await r.json();
+    const stateMessages = {
+      dependency_missing: 'Projection unavailable: umap-learn is not installed.',
+      no_data: 'No projection: at least 3 valid embeddings are required.',
+      projection_failed: 'Projection failed: ' + (projection.error || 'unknown error'),
+    };
+    if (!Array.isArray(projection) && projection.state && projection.state !== 'ready') {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#64748b'; ctx.font = '12px Fira Sans'; ctx.textAlign = 'center';
+      ctx.fillText(stateMessages[projection.state] || projection.message || 'Projection unavailable.', canvas.width/2, canvas.height/2);
+      setEl('emb-count', projection.state); return;
+    }
+    let points = Array.isArray(projection) ? projection : projection.points;
     if (!points || !Array.isArray(points) || !points.length) {
       ctx.fillStyle = '#64748b'; ctx.font = '12px Fira Sans'; ctx.textAlign = 'center';
       ctx.fillText('Not enough data (need 3+ memories)', canvas.width/2, canvas.height/2);

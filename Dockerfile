@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # App code
 COPY server/server.py /app/server.py
+COPY server/maintenance.py /app/maintenance.py
 COPY static/ /app/static/
 COPY scripts/audit-memory-format.py /app/scripts/audit-memory-format.py
 COPY plugin/memory_contract.py /app/plugin/memory_contract.py

@@ -20,6 +20,11 @@ from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse, urlsplit
 
+try:
+    from maintenance import collect_health_diagnostics, probe_ollama
+except ImportError:
+    from server.maintenance import collect_health_diagnostics, probe_ollama
+
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 STATIC_DIR = Path(__file__).parent / "static"
@@ -1263,13 +1268,37 @@ def api_get_duplicates(threshold: float = 0.9) -> list:
         return {"error": str(e)}
 
 
-def api_get_projection(n_neighbors: int = 15, min_dist: float = 0.1) -> list:
+def api_get_projection(n_neighbors: int = 15, min_dist: float = 0.1) -> dict:
     """GET /api/projection — UMAP 2D projection."""
     try:
         store = _get_store()
         return store.get_projection(n_neighbors, min_dist)
     except Exception as e:
-        return {"error": str(e)}
+        return {"state": "projection_failed", "error": str(e), "points": []}
+
+
+def api_get_health() -> dict:
+    """GET /api/health — bounded read-only local storage diagnostics."""
+    try:
+        store = _get_store()
+        store_module = sys.modules.get(type(store).__module__)
+        model = str(getattr(store_module, "EMBED_MODEL", "unknown"))
+        embed_url = str(getattr(store_module, "EMBED_URL", "http://localhost:11434/api/embed"))
+        contract_module = sys.modules.get(getattr(getattr(store_module, "MemoryWrite", None), "__module__", ""))
+        contract_version = int(getattr(contract_module, "CONTRACT_VERSION", 2))
+        return collect_health_diagnostics(
+            Path(getattr(store, "_path", LANCEDB_PATH)),
+            store._db,
+            pipeline={
+                "model": model,
+                "dimension": 768,
+                "version": contract_version,
+                "metric": "cosine",
+            },
+            ollama_probe=lambda: probe_ollama(embed_url),
+        )
+    except Exception as error:
+        return {"error": str(error), "read_only": True, "tables": {}}
 
 
 def api_get_clusters(threshold: float = 0.6, min_size: int = 2) -> list:
@@ -1775,6 +1804,8 @@ class Handler(BaseHTTPRequestHandler):
             n_neighbors = int(params.get("n_neighbors", ["15"])[0])
             min_dist = float(params.get("min_dist", ["0.1"])[0])
             self._send_json(api_get_projection(n_neighbors, min_dist))
+        elif path == "/api/health":
+            self._send_json(api_get_health())
         elif path == "/api/clusters":
             threshold = float(params.get("threshold", ["0.6"])[0])
             min_size = int(params.get("min_size", ["2"])[0])

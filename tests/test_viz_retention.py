@@ -3,6 +3,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -107,6 +108,41 @@ class FakeReviewStore:
 
     def get_typed_edges(self, include_unresolved=False):
         return [{"from": MEMORY_ID, "to": "", "relation_type": "depends", "target_label": "Project:Missing"}]
+
+
+class FakeHealthTable:
+    def __init__(self, *, version, rows, useful_bytes, fragments, indices=()):
+        self.version = version
+        self._rows = rows
+        self._useful_bytes = useful_bytes
+        self._fragments = fragments
+        self._indices = indices
+
+    def count_rows(self):
+        return self._rows
+
+    def list_versions(self):
+        return [{}] * self.version
+
+    def stats(self):
+        return SimpleNamespace(total_bytes=self._useful_bytes)
+
+    def to_lance(self):
+        return SimpleNamespace(get_fragments=lambda: [object()] * self._fragments)
+
+    def list_indices(self):
+        return self._indices
+
+
+class FakeHealthDatabase:
+    def __init__(self, tables):
+        self.tables = tables
+
+    def list_tables(self):
+        return SimpleNamespace(tables=list(self.tables))
+
+    def open_table(self, name):
+        return self.tables[name]
 
 
 class VizRetentionTests(unittest.TestCase):
@@ -519,6 +555,46 @@ class VizRetentionTests(unittest.TestCase):
         self.assertIn("new IntersectionObserver", graph)
         self.assertIn("network.stopSimulation()", graph)
         self.assertIn("pauseGraphPhysics", app)
+
+    def test_health_diagnostics_separate_useful_history_fts_and_ollama_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "lancedb"
+            table_dir = db_path / "memories.lance"
+            table_dir.mkdir(parents=True)
+            (table_dir / "history.bin").write_bytes(b"x" * 1000)
+            fts = SimpleNamespace(index_type="FTS", columns=["content"], num_unindexed_rows=3, num_indexed_rows=7)
+            database = FakeHealthDatabase({
+                "memories": FakeHealthTable(version=5, rows=10, useful_bytes=400, fragments=4, indices=[fts]),
+            })
+
+            result = server.collect_health_diagnostics(
+                db_path, database,
+                pipeline={"model": "nomic-embed-text", "dimension": 768, "version": 2},
+                ollama_probe=lambda: {"state": "error", "error": "connection refused"},
+            )
+
+        self.assertEqual(1, result["budgets"]["tables"])
+        self.assertEqual(5, result["tables"]["memories"]["current_version"])
+        self.assertEqual(4, result["tables"]["memories"]["fragments"])
+        self.assertEqual(3, result["fts"]["num_unindexed_rows"])
+        self.assertEqual(400, result["storage"]["useful_bytes"])
+        self.assertEqual(600, result["storage"]["history_bytes"])
+        self.assertEqual("error", result["ollama"]["state"])
+        self.assertEqual("nomic-embed-text", result["pipeline"]["model"])
+        self.assertEqual(400, result["maintenance_estimate"]["estimated_after_bytes"])
+
+    def test_projection_and_health_ui_distinguish_dependency_error_and_no_data(self):
+        html = (ROOT / "static" / "index.html").read_text()
+        app = (ROOT / "static" / "app.js").read_text()
+        store_source = (ROOT / "plugin" / "store.py").read_text()
+
+        self.assertIn('id="health-scan"', html)
+        self.assertIn('id="health-container"', html)
+        self.assertIn("async function loadHealth()", app)
+        self.assertIn("dependency_missing", app)
+        self.assertIn("no_data", app)
+        self.assertIn("projection_failed", app)
+        self.assertIn("PROJECTION_MAX_POINTS = 500", store_source)
 
     def test_server_has_no_direct_table_update_and_graph_uses_memory_endpoint(self):
         source = (ROOT / "server" / "server.py").read_text()

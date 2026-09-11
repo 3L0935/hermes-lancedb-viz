@@ -178,7 +178,13 @@
       <!-- Embeddings -->
       <div id="page-embedding" class="page">
         <div class="page-inner">
-          <div class="section-header"><h2>Embedding Projection</h2><span class="sub" id="emb-count"></span></div>
+          <div class="section-header"><h2>Health &amp; Embeddings</h2><span class="sub" id="emb-count"></span></div>
+          <div class="health-toolbar">
+            <button id="health-scan" class="btn-neon btn-focus" onclick="loadHealth()">Inspect local health</button>
+            <span>Read-only · max 4 tables</span>
+          </div>
+          <div id="health-container" class="health-grid"><div class="empty-state">Health diagnostics run only on request.</div></div>
+          <div class="section-header health-projection-title"><h2>Embedding Projection</h2></div>
           <div class="filter-bar">
             <label>Neighbors <input type="range" id="emb-neighbors" min="5" max="30" step="1" value="15" oninput="document.getElementById('emb-neighbors-val').textContent=this.value;loadEmbedding()">
             <span id="emb-neighbors-val" style="font-size:12px;color:var(--accent);">15</span></label>

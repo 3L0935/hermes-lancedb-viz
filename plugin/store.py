@@ -39,6 +39,7 @@ SEARCH_MAX_COSINE_DISTANCE = 0.30
 SEARCH_MIN_BM25_SCORE = 12.75
 SEARCH_NEIGHBOR_BUDGET = 5
 SEARCH_DIAGNOSTIC_HISTORY_LIMIT = 100
+PROJECTION_MAX_POINTS = 500
 
 _MUTATION_LOCKS: dict[str, threading.RLock] = {}
 _MUTATION_LOCKS_GUARD = threading.Lock()
@@ -2791,9 +2792,15 @@ class LanceDBStore:
         stale.sort(key=lambda m: m.get("created_at", 0))
         return stale
 
-    def get_projection(self, n_neighbors: int = 15, min_dist: float = 0.1) -> list[dict]:
-        """Compute UMAP 2D projection of all memory embeddings."""
-        raw = self._get_all_raw()
+    def get_projection(self, n_neighbors: int = 15, min_dist: float = 0.1) -> dict:
+        """Compute a bounded UMAP projection with explicit operational state."""
+        self._fresh()
+        raw = (
+            self._table.search()
+            .select(["id", "content", "category", "type", "tags", "quality", "created_at", "vector"])
+            .limit(PROJECTION_MAX_POINTS)
+            .to_list()
+        )
         vectors = []
         mems = []
         for r in raw:
@@ -2808,7 +2815,12 @@ class LanceDBStore:
             mems.append(r)
 
         if len(vectors) < 3:
-            return []
+            return {
+                "state": "no_data",
+                "message": "At least 3 valid embeddings are required.",
+                "points": [],
+                "budget": PROJECTION_MAX_POINTS,
+            }
 
         try:
             import umap
@@ -2829,13 +2841,30 @@ class LanceDBStore:
                     "quality": m.get("quality", 0.5),
                     "created_at": m.get("created_at", 0),
                 })
-            return points
+            return {
+                "state": "ready",
+                "points": points,
+                "count": len(points),
+                "budget": PROJECTION_MAX_POINTS,
+                "truncated": len(raw) >= PROJECTION_MAX_POINTS,
+            }
         except ImportError:
             logger.warning("umap-learn not installed — skipping projection")
-            return []
+            return {
+                "state": "dependency_missing",
+                "dependency": "umap-learn",
+                "message": "Install umap-learn to enable the projection.",
+                "points": [],
+                "budget": PROJECTION_MAX_POINTS,
+            }
         except Exception as e:
             logger.warning("UMAP projection failed: %s", e)
-            return []
+            return {
+                "state": "projection_failed",
+                "error": str(e)[:300],
+                "points": [],
+                "budget": PROJECTION_MAX_POINTS,
+            }
 
     def get_clusters(self, threshold: float = 0.6, min_size: int = 2) -> list[dict]:
         """Find semantic clusters using label propagation on vector similarity."""

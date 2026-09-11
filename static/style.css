@@ -515,3 +515,14 @@ input[type=range] { height: 4px; accent-color: var(--indigo); cursor: pointer; }
 .review-reason { grid-row:1 / span 2; color:#a5b4fc; font:600 11px 'Fira Code', monospace; }
 .review-id { overflow:hidden; text-overflow:ellipsis; color:var(--muted); font:10px 'Fira Code', monospace; }
 .review-message { font-size:12px; }
+.health-toolbar { display:flex; align-items:center; gap:10px; margin-bottom:10px; color:var(--muted); font-size:10px; }
+.health-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px; margin-bottom:18px; }
+.health-card { display:grid; gap:4px; padding:10px; border:1px solid var(--border); border-radius:7px; background:rgba(10,10,22,.72); }
+.health-card > span { color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.06em; }
+.health-card > b { overflow:hidden; text-overflow:ellipsis; color:#cbd5e1; font:600 12px 'Fira Code', monospace; }
+.health-card > small { color:var(--muted); font-size:10px; }
+.health-ok, .health-current { color:#6ee7b7 !important; }
+.health-error, .health-lagging { color:#fca5a5 !important; }
+.health-table { grid-column:1 / -1; overflow:auto; }
+.health-estimate { grid-column:1 / -1; padding:9px 11px; border-left:3px solid #f59e0b; background:rgba(245,158,11,.07); color:#cbd5e1; font-size:11px; }
+.health-projection-title { margin-top:8px; }
