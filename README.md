@@ -314,26 +314,19 @@ python3 scripts/audit-memory-format.py --db-path /path/to/lancedb --fail-on-drif
 
 ### migrate-memory-format.py
 
-Builds and verifies a database copy under a dedicated `/tmp` directory, then
-classifies rows as `canonical`, `safe_normalize`, `manual_review`, or
-`warning_only`. Dry-run is the default. `--apply` creates a second verified
-backup and applies safe normalization to the working copy only; it never
-writes to `--source-db`.
+Reads projected fields and classifies rows as `canonical`, `auto_fix`,
+`quarantine`, or `warning_only`. It is always a dry-run: `auto_fix` means a
+change is mechanically unambiguous, not that the script applies it. There is
+no write or apply mode.
 
 ```bash
 python3 scripts/migrate-memory-format.py \
   --source-db /path/to/lancedb \
-  --work-dir /tmp/memory-format-review \
-  --pretty
-
-python3 scripts/migrate-memory-format.py \
-  --source-db /path/to/lancedb \
-  --work-dir /tmp/memory-format-apply \
-  --apply --pretty
+  --dry-run --pretty
 ```
 
-Review the JSON report and test the copied database before planning a separate
-live migration. This hardening does not promote `domain`, `subject`, or `facts`
+Review the JSON report before planning a separately approved migration on a
+verified copy. This hardening does not promote `domain`, `subject`, or `facts`
 to LanceDB columns; the current table schema is unchanged. Any future schema
 migration must use create, copy, verify, and drop—not `rename_table()`.
 

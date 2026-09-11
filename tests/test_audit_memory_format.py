@@ -34,6 +34,7 @@ class MemoryFormatAuditTests(unittest.TestCase):
             },
         ])
 
+        self.assertEqual(2, report["schema_version"])
         self.assertTrue(report["read_only"])
         self.assertEqual({
             "total": 4,

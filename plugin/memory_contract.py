@@ -550,6 +550,43 @@ def canonicalize_content(content: Any, *, category: str = "fact") -> str:
     return render_content(parse_content(content, category=category))
 
 
+def canonicalize_unambiguous_legacy_content(
+    content: Any,
+    *,
+    category: str = "fact",
+) -> str:
+    """Canonicalize only mechanically provable legacy wrapper duplication.
+
+    This helper is intentionally narrow and is used only to build migration
+    plans. It never guesses a missing subject, splits prose, or changes facts.
+    """
+    if not isinstance(content, str):
+        _raise("invalid_type", "content", "content must be a string", type(content).__name__, "string")
+    candidate = unicodedata.normalize("NFKC", content).strip()
+
+    markers = list(_TIER_MARKER_RE.finditer(candidate))
+    if len(markers) > 1:
+        marker_values = {match.group(1).strip() for match in markers}
+        repeated_suffix = candidate[markers[0].start():]
+        duplicate_suffix = re.fullmatch(
+            r"(?:\[\s*tier\s*=\s*([123])\s*\]\s*)+",
+            repeated_suffix,
+            re.IGNORECASE,
+        )
+        if len(marker_values) != 1 or duplicate_suffix is None:
+            return canonicalize_content(candidate, category=category)
+        candidate = f"{candidate[:markers[0].start()].rstrip()} [Tier={markers[0].group(1).strip()}]"
+
+    duplicate_prefix = re.match(
+        r"^(?P<prefix>[^\s:]+:\S+)\s+(?P=prefix)\s+(?P<body>.+)$",
+        candidate,
+    )
+    if duplicate_prefix is not None:
+        candidate = f"{duplicate_prefix.group('prefix')} {duplicate_prefix.group('body')}"
+
+    return canonicalize_content(candidate, category=category)
+
+
 def contract_warnings(memory: MemoryWrite) -> tuple[ContractIssue, ...]:
     subject = memory.subject.casefold()
     if subject == memory.domain.casefold() or subject in _GENERIC_SUBJECTS:

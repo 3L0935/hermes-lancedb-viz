@@ -22,6 +22,7 @@ sys.modules[CONTRACT_SPEC.name] = contract
 CONTRACT_SPEC.loader.exec_module(contract)
 
 MemoryContractError = contract.MemoryContractError
+CONTRACT_VERSION = contract.CONTRACT_VERSION
 contract_warnings = contract.contract_warnings
 parse_content = contract.parse_content
 render_content = contract.render_content
@@ -74,7 +75,7 @@ def audit_rows(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
             })
 
     return {
-        "schema_version": 1,
+        "schema_version": CONTRACT_VERSION,
         "read_only": True,
         "summary": {
             "total": total,
@@ -129,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         report = audit_rows(read_rows(args.db_path, args.table))
     except Exception as error:
         report = {
-            "schema_version": 1,
+            "schema_version": CONTRACT_VERSION,
             "read_only": True,
             "operational_error": {
                 "code": "audit_read_failed",
