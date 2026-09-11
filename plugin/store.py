@@ -550,7 +550,7 @@ class LanceDBStore:
         target_label = str(relation.get("target") or relation.get("target_label") or "").strip()
         if target_id:
             _require_memory_id(target_id, "target_id")
-        memories = self._get_all_raw()
+        memories = self.get_all()
         by_id = {str(memory["id"]): memory for memory in memories}
 
         if target_id and target_id in by_id:
@@ -840,7 +840,7 @@ class LanceDBStore:
         from uuid import uuid4
         import pyarrow as pa
 
-        memory_ids = {str(row["id"]) for row in self._get_all_raw()}
+        memory_ids = {str(row["id"]) for row in self.get_all()}
         normalized = []
         for record in records:
             if not isinstance(record, dict):
@@ -919,7 +919,7 @@ class LanceDBStore:
         created = []
         to_insert = []
         now = time.time()
-        for other in self._get_all_raw():
+        for other in self.get_all():
             other_id = str(other["id"])
             if other_id == memory_id or other.get("category") not in relevant_categories:
                 continue
@@ -1019,7 +1019,7 @@ class LanceDBStore:
         else:
             table = self._ensure_conflicts_table()
             rows = table.to_arrow().to_pylist()
-        memories = {str(row["id"]): row for row in self._get_all_raw()}
+        memories = {str(row["id"]): row for row in self.get_all()}
         result = []
         for row in rows:
             if status and status != "archived" and row.get("status") != status:
@@ -1219,7 +1219,7 @@ class LanceDBStore:
         same_subject = []
         conflicts = []
 
-        for row in self._get_all_raw():
+        for row in self.get_all():
             if str(row.get("id") or "") == exclude_id:
                 continue
             if canonical_subject(str(row.get("content") or "")) != subject:
@@ -1745,7 +1745,7 @@ class LanceDBStore:
 
         self._fresh()
         existing_by_id = {
-            str(row["id"]): row for row in self._get_all_raw()
+            str(row["id"]): row for row in self.get_all()
         }
         existing_ids = set(existing_by_id)
         imported = 0
@@ -1994,10 +1994,16 @@ class LanceDBStore:
 
     def get_all(self) -> list[dict]:
         """Get all memories WITHOUT vectors."""
-        memories = self._get_all_raw()
-        for m in memories:
-            m.pop("vector", None)
-        return memories
+        self._fresh()
+        try:
+            columns = [name for name in self._table.schema.names if name != "vector"]
+            memories = self._table.search().select(columns).to_list()
+            for memory in memories:
+                self._parse_json_fields(memory)
+            return memories
+        except Exception as e:
+            logger.error("get_all failed: %s", e)
+            return []
 
     def count(self) -> int:
         self._fresh()
@@ -2088,7 +2094,7 @@ class LanceDBStore:
         except Exception:
             needle = query.strip().strip('"').lower()
             rows = [
-                row for row in self._get_all_raw()
+                row for row in self.get_all()
                 if needle in (row.get("content") or "").lower()
                 and (not category or row.get("category") == category)
             ][:top_k]
@@ -2180,7 +2186,7 @@ class LanceDBStore:
     def graph(self) -> dict:
         """Return all memories as graph nodes + edges (entity-based links)."""
         self._fresh()
-        memories = self._get_all_raw()
+        memories = self.get_all()
         nodes = []
         for m in memories:
             content = m["content"]
@@ -2637,7 +2643,7 @@ class LanceDBStore:
         target_entities = set(target.get("entities", []))
         target_sig = {e for e in target_entities if e not in _STOP_ENTITIES}
 
-        all_memories = self._get_all_raw()
+        all_memories = self.get_all()
         linked = []
         for m in all_memories:
             if m["id"] == memory_id:
@@ -2667,7 +2673,7 @@ class LanceDBStore:
 
     def _rebuild_all_links(self) -> None:
         """Rebuild all entity-based links across the entire store."""
-        all_memories = self._get_all_raw()
+        all_memories = self.get_all()
         mem_sigs = {}
         for m in all_memories:
             entities = set(m.get("entities", []))

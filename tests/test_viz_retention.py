@@ -3,6 +3,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -103,6 +104,44 @@ class VizRetentionTests(unittest.TestCase):
                 self.assertEqual(12345, reader.db_size)
             finally:
                 LanceDBStore._embed = original_embed
+
+    def test_dashboard_stats_selects_columns_without_vector(self):
+        original_embed = LanceDBStore._embed
+        LanceDBStore._embed = lambda _self, _text: np.pad(
+            np.ones(1, dtype=np.float32), (0, 767)
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                store = LanceDBStore(Path(tmp))
+                store.add(
+                    "Project:Alpha state=active [Tier=2]",
+                    category="project",
+                    legacy=True,
+                )
+                server._store_instance = store
+                original_search = store._table.search
+                selected_columns = []
+
+                def tracked_search(*args, **kwargs):
+                    query = original_search(*args, **kwargs)
+                    original_select = query.select
+
+                    def tracked_select(columns):
+                        selected_columns.append(tuple(columns))
+                        return original_select(columns)
+
+                    query.select = tracked_select
+                    return query
+
+                with patch.object(store._table, "search", side_effect=tracked_search):
+                    result = server._compute_stats_fast()
+
+                self.assertEqual(1, result["total_memories"])
+                self.assertEqual(1, len(selected_columns))
+                self.assertNotIn("vector", selected_columns[0])
+                self.assertIn("content", selected_columns[0])
+        finally:
+            LanceDBStore._embed = original_embed
 
     def test_export_import_round_trip_preserves_relations_and_conflict_audit(self):
         original_embed = LanceDBStore._embed

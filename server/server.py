@@ -251,11 +251,17 @@ def _compute_stats_fast() -> dict:
     store._fresh()
     now = time.time()
 
-    # Read only the columns we need (no vector column)
-    try:
-        arrow = store._table.to_arrow().drop(["vector"])
-    except Exception:
-        arrow = store._table.to_arrow()
+    # Project before materialization so the large vector column is never read.
+    arrow = store._table.search().select([
+        "category",
+        "type",
+        "content",
+        "created_at",
+        "access_count",
+        "entities",
+        "tags",
+        "quality",
+    ]).to_arrow()
 
     n = arrow.num_rows
     categories = {}

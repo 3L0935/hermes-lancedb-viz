@@ -48,6 +48,32 @@ class StoreRetentionTests(unittest.TestCase):
         values.update(overrides)
         return MemoryWrite.from_mapping(values)
 
+    def test_list_queries_select_columns_without_vector(self):
+        self.add("Project:Alpha state=active [Tier=2]")
+        original_search = self.store._table.search
+        selected_columns = []
+
+        def tracked_search(*args, **kwargs):
+            query = original_search(*args, **kwargs)
+            original_select = query.select
+
+            def tracked_select(columns):
+                selected_columns.append(tuple(columns))
+                return original_select(columns)
+
+            query.select = tracked_select
+            return query
+
+        with patch.object(self.store._table, "search", side_effect=tracked_search):
+            listed = self.store.get_all()
+            filtered = self.store.get_by_filters(category="project", limit=20)
+
+        self.assertEqual(1, len(listed))
+        self.assertEqual(1, filtered["total"])
+        self.assertGreaterEqual(len(selected_columns), 2)
+        self.assertTrue(all("vector" not in columns for columns in selected_columns))
+        self.assertTrue(all("content" in columns for columns in selected_columns))
+
     def test_direct_raw_add_is_fenced_from_cron_style_bypass(self):
         with self.assertRaises(MemoryContractError) as caught:
             self.store.add("garbage copied from cron")
