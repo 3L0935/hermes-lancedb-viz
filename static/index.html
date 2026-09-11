@@ -233,10 +233,13 @@
             <option value="correction">Corrections</option>
             <option value="fact">Facts</option>
           </select>
-          <select id="cluster-mode">
-            <option value="raw">Raw links</option>
-            <option value="domain">Domain hubs</option>
-            <option value="entity">Entity clusters</option>
+          <select id="relation-filter">
+            <option value="">All declared relations</option>
+            <option value="part_of">part_of</option><option value="depends">depends</option>
+            <option value="requires">requires</option><option value="runs_on">runs_on</option>
+            <option value="connects_to">connects_to</option><option value="uses">uses</option>
+            <option value="extends">extends</option><option value="supersedes">supersedes</option>
+            <option value="invalidates">invalidates</option><option value="contradicts">contradicts</option>
           </select>
           <label>Threshold
             <input type="range" id="threshold-slider" min="0.3" max="1" step="0.05" value="0.8"
@@ -247,6 +250,7 @@
           <label><input type="checkbox" id="tier1" checked onchange="applyFilters()"> T1</label>
           <label><input type="checkbox" id="tier2" checked onchange="applyFilters()"> T2</label>
           <label><input type="checkbox" id="tier3" checked onchange="applyFilters()"> T3</label>
+          <span id="hidden-neighbor-count" class="graph-budget">Select a memory to load its neighborhood</span>
           <button id="refresh-btn" class="btn-neon btn-neon-export">Refresh</button>
         </div>
         <div id="main">

@@ -9,6 +9,7 @@ let network = null;
 let allData = { nodes: [], edges: [], typed_edges: [] };
 let selectedNodeId = null;
 let highlightedTypedEdges = new Set(); // node IDs highlighted for typed relations
+let graphIntersectionVisible = false;
 const MAX_EDITOR_FACTS = 12;
 const MAX_EDITOR_RELATIONS = 20;
 
@@ -42,12 +43,21 @@ const colorHexDef = defaultColor.hex;
 
 async function loadGraph() {
   document.getElementById('loading').style.display = 'block';
-  const cluster = document.getElementById('cluster-mode')?.value || 'raw';
   const threshold = document.getElementById('threshold-slider')?.value || 0.8;
+  const relationType = document.getElementById('relation-filter')?.value || '';
+  if (!selectedNodeId) {
+    allData = {nodes: [], edges: [], typed_edges: [], selection_required: true, hidden_neighbor_count: 0};
+    renderGraph();
+    const loading = document.getElementById('loading');
+    loading.style.display = 'block';
+    loading.innerHTML = '<div>Select a search result or memory to load a bounded neighborhood.</div>';
+    return;
+  }
   try {
-    const resp = await fetch('/api/graph?cluster=' + cluster + '&threshold=' + threshold);
+    const resp = await fetch('/api/graph?memory_id=' + encodeURIComponent(selectedNodeId) + '&threshold=' + threshold + '&relation_types=' + encodeURIComponent(relationType));
     allData = await resp.json();
     renderGraph();
+    if (!allData.error && allData.nodes.some(node => node.id === selectedNodeId)) openSidebar(selectedNodeId);
   } catch (e) {
     console.error('Failed to load graph:', e);
     document.getElementById('loading').innerHTML = 'Load error. Check server.';
@@ -68,6 +78,7 @@ function renderGraph() {
   setEl('ent-count', countEntities(allData.nodes));
   const totalEdges = (allData.edges?.length || 0);
   setEl('edge-count', totalEdges);
+  setEl('hidden-neighbor-count', (allData.hidden_neighbor_count || 0) + ' hidden by budget · ' + (allData.hidden_by_relation_filter || 0) + ' hidden by relation filter');
   const fleg = document.getElementById('fresh-legend');
   if (fleg) fleg.style.display = 'flex';
 
@@ -113,14 +124,20 @@ function renderGraph() {
     };
   });
 
-  // Vector edges only (cosine similarity) — typed edges shown on selection only
-  const visEdges = (allData.edges || []).map(e => ({
-    from: e.from, to: e.to, label: e.label || '',
-    color: { color: '#3a3a6a', highlight: '#818cf8', hover: '#a5b4fc' },
-    width: 1.5, smooth: { type: 'curvedCW', roundness: 0.15 },
-    font: { color: '#64748b', size: 9, strokeWidth: 0 },
-    arrows: { to: { enabled: false } },
-  }));
+  const visEdges = (allData.edges || []).map(e => {
+    if (e.kind === 'declared') return {
+      from: e.from, to: e.to, label: e.label || '', kind: 'declared',
+      color: {color:'#f59e0b', highlight:'#fbbf24', hover:'#fbbf24'}, width:2.2,
+      dashes:false, font:{color:'#fbbf24', size:9, strokeWidth:0},
+      arrows:{to:{enabled:true, scaleFactor:0.55}}, smooth:{type:'curvedCW', roundness:0.12},
+    };
+    return {
+      from: e.from, to: e.to, label: e.label || '', kind: 'semantic',
+      color: {color:'#3a3a6a', highlight:'#818cf8', hover:'#a5b4fc'}, width:1.3,
+      dashes:[4,5], font:{color:'#64748b', size:9, strokeWidth:0},
+      arrows:{to:{enabled:false}}, smooth:{type:'curvedCW', roundness:0.15},
+    };
+  });
 
   if (network) {
     // Update in-place
@@ -153,7 +170,7 @@ function renderGraph() {
 
     network.on('click', function(params) {
       if (params.nodes.length) {
-        openSidebar(params.nodes[0]);
+        loadNeighborhood(params.nodes[0]);
       } else {
         closeSidebar();
       }
@@ -161,7 +178,31 @@ function renderGraph() {
   }
 
   applyFilters();
+  setGraphPhysicsActive(graphIntersectionVisible && !document.hidden);
 }
+
+async function loadNeighborhood(nodeId) {
+  selectedNodeId = nodeId;
+  closeSearchPanel();
+  await loadGraph();
+}
+
+function setGraphPhysicsActive(active) {
+  if (!network) return;
+  network.setOptions({physics: {enabled: Boolean(active)}});
+  if (active) network.startSimulation();
+  else network.stopSimulation();
+}
+
+function pauseGraphPhysics() { setGraphPhysicsActive(false); }
+function resumeGraphPhysics() { setGraphPhysicsActive(graphIntersectionVisible && !document.hidden); }
+
+const graphObserver = new IntersectionObserver(entries => {
+  graphIntersectionVisible = entries.some(entry => entry.isIntersecting);
+  setGraphPhysicsActive(graphIntersectionVisible && !document.hidden);
+}, {threshold: 0.01});
+graphObserver.observe(document.getElementById('graph-container'));
+document.addEventListener('visibilitychange', () => setGraphPhysicsActive(graphIntersectionVisible && !document.hidden));
 
 // ═══════════════════════════════════════════════
 // Typed edge highlighting (shown only on selection)
@@ -562,7 +603,6 @@ async function saveEdit(nodeId) {
 }
 
 function closeSidebar() {
-  selectedNodeId = null;
   resetTypedHighlights();
   document.getElementById('sidebar').classList.remove('open');
   if (network) network.unselectAll();
@@ -583,7 +623,7 @@ async function deleteNode(nodeId) {
   try {
     const resp = await fetch('/api/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({memory_id: nodeId}) });
     if ((await resp.json()).error) return;
-    closeSidebar(); loadGraph();
+    closeSidebar(); selectedNodeId = null; loadGraph();
   } catch(e) { console.error('Delete error:', e); }
 }
 
@@ -661,7 +701,7 @@ async function doSemanticSearch() {
     if (!data.results.length) { panel.innerHTML = '<div class="search-empty">No results.</div>'; return; }
     panel.innerHTML = data.results.map(r => {
       const cat = catLabels[r.category] || r.category || 'Fact';
-      return '<div class="search-item" onclick="openSidebar(\'' + escapeJsString(r.id) + '\')">' +
+      return '<div class="search-item" onclick="loadNeighborhood(\'' + escapeJsString(r.id) + '\')">' +
         '<span class="s-cat cat-' + safeCategory(r.category) + '">' + escapeHtml(cat) + '</span>' +
         '<span class="s-meta">score: ' + (r._distance ? r._distance.toFixed(2) : '0.00') + '</span>' +
         '<div class="s-content">' + escapeHtml((r.content || '').substring(0, 140)) + '</div></div>';
@@ -725,7 +765,7 @@ document.addEventListener('click', function(e) {
   if (panel.classList.contains('visible') && e.target !== document.getElementById('search') && !panel.contains(e.target)) closeSearchPanel();
 });
 document.getElementById('cat-filter').addEventListener('change', applyFilters);
-document.getElementById('cluster-mode').addEventListener('change', () => { closeSidebar(); loadGraph(); });
+document.getElementById('relation-filter').addEventListener('change', () => { closeSidebar(); loadGraph(); });
 document.getElementById('refresh-btn').addEventListener('click', () => { closeSearchPanel(); closeSidebar(); loadGraph(); });
 document.getElementById('sidebar-close').addEventListener('click', closeSidebar);
 

@@ -31,6 +31,9 @@ REVIEW_MAX_PROJECTED_ROWS = 2000
 REVIEW_MAX_VECTOR_ROWS = 500
 REVIEW_MAX_FINDINGS = 100
 REVIEW_NEAR_DUPLICATE_THRESHOLD = 0.95
+GRAPH_MAX_NODES = 40
+GRAPH_MAX_EDGES = 80
+GRAPH_MAX_SEMANTIC_NEIGHBORS = 30
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 _CANONICAL_ID_RE = re.compile(
@@ -456,39 +459,180 @@ def _get_cached_stats() -> dict:
 # API handlers — legacy (kept for backward compat)
 # ---------------------------------------------------------------------------
 
-def get_graph_data(cluster: str = "raw", threshold: float = 0.65) -> dict:
-    """Read memories from LanceDB and format as graph.
+def _graph_node(row: dict, *, center: bool = False) -> dict:
+    content = str(row.get("content") or "")
+    first_part = content.split()[0] if content else "?"
+    return {
+        "id": str(row.get("id") or ""),
+        "label": first_part.rstrip(":,")[:30],
+        "title": content,
+        "category": str(row.get("category") or "fact"),
+        "node_type": "center" if center else "neighbor",
+        "created_at": float(row.get("created_at") or 0.0),
+        "access_count": int(row.get("access_count") or 0),
+        "entities": _parse_entities(row.get("entities", [])),
+        "relations": _parse_entities(row.get("relations", [])),
+        "tier": "1" if "[Tier=1]" in content else "2" if "[Tier=2]" in content else "3" if "[Tier=3]" in content else "none",
+    }
 
-    cluster='domain': vector links + community hubs (✦ prefix)
-    cluster='entity': vector links + community hubs (◆ prefix)  
-    cluster='raw' (default): pure vector links, no hubs
-    threshold: cosine similarity threshold (0.0-1.0, default 0.65)
 
-    Resets the store singleton so every graph load reflects latest DB writes
-    without requiring a container restart.
-    """
-    _reset_store()
-    try:
-        _import_store_module()
-    except ImportError:
-        return {"error": "LanceDB plugin not found", "nodes": [], "edges": []}
+def _build_neighborhood_graph(
+    center: dict,
+    candidate_rows: list[dict],
+    typed_edges: list[dict],
+    relation_types: set[str],
+    *,
+    threshold: float,
+    node_budget: int = GRAPH_MAX_NODES,
+    edge_budget: int = GRAPH_MAX_EDGES,
+) -> dict:
+    """Build one bounded one-hop graph, preferring declared relations."""
+    center_id = str(center.get("id") or "")
+    rows_by_id = {str(row.get("id") or ""): row for row in candidate_rows}
+    rows_by_id[center_id] = center
+    available_types = sorted({
+        str(edge.get("relation_type") or "")
+        for edge in typed_edges
+        if edge.get("from") == center_id or edge.get("to") == center_id
+    } - {""})
+    filtered_typed = [
+        edge for edge in typed_edges
+        if (edge.get("from") == center_id or edge.get("to") == center_id)
+        and str(edge.get("relation_type") or "") in relation_types
+        and edge.get("to")
+    ]
+    hidden_by_filter = sum(
+        1 for edge in typed_edges
+        if (edge.get("from") == center_id or edge.get("to") == center_id)
+        and str(edge.get("relation_type") or "") not in relation_types
+    )
 
+    nodes = [_graph_node(center, center=True)]
+    node_ids = {center_id}
+    edges = []
+    edge_keys = set()
+    eligible_neighbor_ids = set()
+
+    def add_edge(edge: dict, other_id: str) -> None:
+        eligible_neighbor_ids.add(other_id)
+        if other_id not in rows_by_id or other_id == center_id:
+            return
+        if len(nodes) >= node_budget and other_id not in node_ids:
+            return
+        if len(edges) >= edge_budget:
+            return
+        key = (str(edge.get("from")), str(edge.get("to")), edge.get("kind"))
+        if key in edge_keys:
+            return
+        if other_id not in node_ids:
+            nodes.append(_graph_node(rows_by_id[other_id]))
+            node_ids.add(other_id)
+        edges.append(edge)
+        edge_keys.add(key)
+
+    for raw_edge in filtered_typed:
+        source = str(raw_edge.get("from") or "")
+        target = str(raw_edge.get("to") or "")
+        other_id = target if source == center_id else source
+        add_edge({
+            "from": source,
+            "to": target,
+            "kind": "declared",
+            "relation_type": str(raw_edge.get("relation_type") or "linked"),
+            "label": str(raw_edge.get("relation_type") or "linked"),
+            "directed": True,
+        }, other_id)
+
+    semantic_rows = sorted(
+        (row for row in candidate_rows if str(row.get("id") or "") != center_id),
+        key=lambda row: float(row.get("_distance", 1.0)),
+    )
+    for row in semantic_rows:
+        other_id = str(row.get("id") or "")
+        distance = float(row.get("_distance", 1.0))
+        similarity = 1.0 - distance
+        if similarity < threshold:
+            continue
+        add_edge({
+            "from": center_id,
+            "to": other_id,
+            "kind": "semantic",
+            "similarity": round(similarity, 4),
+            "label": f"{similarity:.2f}",
+            "directed": False,
+        }, other_id)
+
+    return {
+        "center_id": center_id,
+        "nodes": nodes[:node_budget],
+        "edges": edges[:edge_budget],
+        "typed_edges": [edge for edge in edges if edge["kind"] == "declared"],
+        "available_relation_types": available_types,
+        "hidden_by_relation_filter": hidden_by_filter,
+        "hidden_neighbor_count": max(0, len(eligible_neighbor_ids - node_ids)),
+        "budgets": {
+            "nodes": node_budget,
+            "edges": edge_budget,
+            "semantic_candidates": GRAPH_MAX_SEMANTIC_NEIGHBORS,
+        },
+    }
+
+
+def get_graph_data(
+    cluster: str = "raw",
+    threshold: float = 0.65,
+    memory_id: str = "",
+    relation_types: set[str] | None = None,
+) -> dict:
+    """Return a bounded selected-memory neighborhood; never a global graph."""
+    if not memory_id:
+        return {
+            "selection_required": True,
+            "nodes": [], "edges": [], "typed_edges": [],
+            "hidden_neighbor_count": 0,
+            "budgets": {"nodes": GRAPH_MAX_NODES, "edges": GRAPH_MAX_EDGES, "semantic_candidates": GRAPH_MAX_SEMANTIC_NEIGHBORS},
+        }
+    if not _is_canonical_id(memory_id):
+        return {**_invalid_id(), "nodes": [], "edges": []}
+    threshold = min(max(float(threshold), 0.0), 1.0)
     try:
         store = _get_store()
-
-        if cluster == "entity":
-            result = _build_entity_clustered_graph(store, threshold)
-        elif cluster == "raw":
-            result = _build_raw_graph(store, threshold)
-        else:
-            result = _build_category_hub_graph(store, threshold)
-
-        # Attach typed edges (::relations::)
-        result["typed_edges"] = store.get_typed_edges()
-
-        return result
-    except Exception as e:
-        return {"error": str(e), "nodes": [], "edges": []}
+        center = store._get_by_id_raw(memory_id)
+        if not center:
+            return {"error": "Memory not found", "nodes": [], "edges": []}
+        all_typed = store.get_typed_edges()
+        touching = [
+            edge for edge in all_typed
+            if edge.get("from") == memory_id or edge.get("to") == memory_id
+        ]
+        selected_types = relation_types or {
+            str(edge.get("relation_type") or "") for edge in touching
+        }
+        typed_ids = []
+        for edge in touching:
+            other_id = edge.get("to") if edge.get("from") == memory_id else edge.get("from")
+            if other_id and other_id not in typed_ids:
+                typed_ids.append(other_id)
+        rows = [center]
+        for related_id in typed_ids[:GRAPH_MAX_NODES - 1]:
+            related = store.get_by_id(related_id)
+            if related:
+                rows.append(related)
+        vector = center.get("vector")
+        if vector is not None:
+            semantic = (
+                store._table.search(vector)
+                .distance_type("cosine")
+                .limit(GRAPH_MAX_SEMANTIC_NEIGHBORS + 1)
+                .to_list()
+            )
+            known = {str(row.get("id") or "") for row in rows}
+            rows.extend(row for row in semantic if str(row.get("id") or "") not in known)
+        return _build_neighborhood_graph(
+            center, rows, touching, selected_types, threshold=threshold,
+        )
+    except Exception as error:
+        return {"error": str(error), "nodes": [], "edges": []}
 
 
 def _compute_vector_data(store, threshold: float = 0.65) -> tuple:
@@ -1583,7 +1727,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/graph":
             cluster = params.get("cluster", ["raw"])[0]
             threshold = float(params.get("threshold", ["0.65"])[0])
-            self._send_json(get_graph_data(cluster=cluster, threshold=threshold))
+            memory_id = params.get("memory_id", [""])[0]
+            raw_relation_types = params.get("relation_types", [""])[0]
+            relation_types = {
+                value for value in raw_relation_types.split(",") if value
+            } or None
+            self._send_json(get_graph_data(
+                cluster=cluster,
+                threshold=threshold,
+                memory_id=memory_id,
+                relation_types=relation_types,
+            ))
         elif path == "/api/stats":
             self._send_json(get_stats())
         elif path == "/api/typed-edges":

@@ -6,6 +6,7 @@ const API = '/api';
 let currentPage = 'dashboard';
 
 function switchPage(name) {
+  if (name !== 'graph' && typeof pauseGraphPhysics === 'function') pauseGraphPhysics();
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   const pageEl = document.getElementById('page-' + name);
@@ -26,7 +27,10 @@ function switchPage(name) {
   else if (name === 'embedding') loadEmbedding();
   else if (name === 'clusters') loadClusters();
   else if (name === 'stale') loadStale();
-  else if (name === 'graph') { if (typeof loadGraph === 'function') loadGraph(); }
+  else if (name === 'graph') {
+    if (typeof loadGraph === 'function') loadGraph();
+    if (typeof resumeGraphPhysics === 'function') resumeGraphPhysics();
+  }
   updateTopStats();
 }
 

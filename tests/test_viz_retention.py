@@ -475,6 +475,51 @@ class VizRetentionTests(unittest.TestCase):
         self.assertNotIn("name === 'review') loadReviewInbox()", app)
         self.assertIn("Older does not mean false", html)
 
+    def test_graph_requires_selection_instead_of_building_global_matrix(self):
+        with patch.object(server, "_compute_vector_data", side_effect=AssertionError("global scan")):
+            result = server.get_graph_data()
+
+        self.assertTrue(result["selection_required"])
+        self.assertEqual([], result["nodes"])
+        self.assertEqual([], result["edges"])
+
+    def test_neighborhood_graph_is_bounded_and_distinguishes_edge_kinds(self):
+        center = {"id": MEMORY_ID, "content": "Project:Center state=active [Tier=2]", "category": "project"}
+        rows = [center] + [
+            {"id": f"{index:08x}-aaa", "content": f"Project:N{index} state=active [Tier=2]", "category": "project", "_distance": 0.01 + index / 1000}
+            for index in range(1, 8)
+        ]
+        typed = [
+            {"from": MEMORY_ID, "to": rows[1]["id"], "relation_type": "depends"},
+            {"from": MEMORY_ID, "to": rows[2]["id"], "relation_type": "uses"},
+        ]
+
+        result = server._build_neighborhood_graph(
+            center, rows, typed, {"depends"}, threshold=0.8,
+            node_budget=4, edge_budget=3,
+        )
+
+        self.assertLessEqual(len(result["nodes"]), 4)
+        self.assertLessEqual(len(result["edges"]), 3)
+        self.assertEqual({"declared", "semantic"}, {edge["kind"] for edge in result["edges"]})
+        self.assertEqual(1, result["hidden_by_relation_filter"])
+        self.assertGreater(result["hidden_neighbor_count"], 0)
+        self.assertEqual({"nodes": 4, "edges": 3, "semantic_candidates": 30}, result["budgets"])
+
+    def test_graph_ui_loads_selected_neighborhood_and_pauses_off_screen_physics(self):
+        html = (ROOT / "static" / "index.html").read_text()
+        app = (ROOT / "static" / "app.js").read_text()
+        graph = (ROOT / "static" / "graph.js").read_text()
+
+        self.assertIn('id="relation-filter"', html)
+        self.assertIn('id="hidden-neighbor-count"', html)
+        self.assertIn("memory_id=' + encodeURIComponent(selectedNodeId)", graph)
+        self.assertIn("kind: 'declared'", graph)
+        self.assertIn("kind: 'semantic'", graph)
+        self.assertIn("new IntersectionObserver", graph)
+        self.assertIn("network.stopSimulation()", graph)
+        self.assertIn("pauseGraphPhysics", app)
+
     def test_server_has_no_direct_table_update_and_graph_uses_memory_endpoint(self):
         source = (ROOT / "server" / "server.py").read_text()
         graph = (ROOT / "static" / "graph.js").read_text()
