@@ -1214,6 +1214,21 @@ class LanceDBStore:
             remaining.pop(match_index)
         return not remaining
 
+    @staticmethod
+    def _relations_for_contract(relations: tuple | list) -> list[dict]:
+        """Remove storage-only relation fields before contract validation."""
+        normalized = []
+        for relation in relations:
+            candidate = relation.to_dict() if hasattr(relation, "to_dict") else relation
+            item = {"type": str(candidate.get("type") or "")}
+            target_id = str(candidate.get("target_id") or "").strip()
+            if target_id:
+                item["target_id"] = target_id
+            else:
+                item["target"] = str(candidate.get("target") or "").strip()
+            normalized.append(item)
+        return normalized
+
     def _preflight_memory_write(
         self,
         memory: MemoryWrite,
@@ -1606,6 +1621,10 @@ class LanceDBStore:
             )
 
         replaced_content = str(existing.get("content") or "")
+        existing_category = str(existing.get("category") or "fact")
+        stored_relations = existing.get("relations")
+        if not isinstance(stored_relations, list):
+            stored_relations = []
         content_fields_changed = any(
             value is not None
             for value in (patch.domain, patch.subject, patch.facts, patch.tier)
@@ -1615,54 +1634,86 @@ class LanceDBStore:
 
         if content_fields_changed or patch.category is not None:
             parts = parse_content_parts(replaced_content)
+            candidate_relations = (
+                list(patch.relations)
+                if patch.relations is not None
+                else self._relations_for_contract(stored_relations)
+            )
             candidate = MemoryWrite.from_mapping({
-                "domain": patch.domain or parts.domain,
-                "subject": patch.subject or parts.subject,
+                "domain": patch.domain if patch.domain is not None else parts.domain,
+                "subject": patch.subject if patch.subject is not None else parts.subject,
                 "facts": list(patch.facts) if patch.facts is not None else [parts.body],
-                "tier": patch.tier or parts.tier,
-                "category": patch.category or str(existing.get("category") or "fact"),
-                "relations": [relation.to_dict() for relation in (patch.relations or ())],
+                "tier": patch.tier if patch.tier is not None else parts.tier,
+                "category": patch.category if patch.category is not None else existing_category,
+                "relations": [
+                    relation.to_dict() if hasattr(relation, "to_dict") else relation
+                    for relation in candidate_relations
+                ],
             })
             canonical_content = render_content(candidate)
-            exact, same_subject, conflicts = self._preflight_memory_write(
-                candidate,
-                exclude_id=patch.memory_id,
+            existing_memory = parse_content(
+                replaced_content,
+                category=existing_category,
+                relations=[relation.to_dict() for relation in candidate.relations],
             )
-            if exact is not None:
-                raise self._contract_error(
-                    "duplicate_memory", "facts", "update would duplicate another memory",
-                    str(exact.get("id") or ""), "unique canonical memory",
+            semantic_unchanged = (
+                canonical_content == render_content(existing_memory)
+                and self._relation_lists_match(candidate.relations, stored_relations)
+                and memory_fingerprint(candidate) == memory_fingerprint(existing_memory)
+            )
+            if not semantic_unchanged:
+                exact, same_subject, conflicts = self._preflight_memory_write(
+                    candidate,
+                    exclude_id=patch.memory_id,
                 )
-            if conflicts and not _allow_claim_replacement:
-                raise self._contract_error(
-                    "conflicting_claims",
-                    "facts",
-                    "update conflicts with another same-subject memory",
-                    conflicts,
-                    "resolve the conflict before updating",
-                )
-            if len(same_subject) > 1 and _allow_claim_replacement:
-                raise self._contract_error(
-                    "ambiguous_subject", "subject", "upsert target became ambiguous",
-                    [str(row.get("id") or "") for row in same_subject],
-                    "one same-subject memory",
-                )
-            if content_fields_changed:
+                if exact is not None:
+                    raise self._contract_error(
+                        "duplicate_memory", "facts", "update would duplicate another memory",
+                        str(exact.get("id") or ""), "unique canonical memory",
+                    )
+                if conflicts and not _allow_claim_replacement:
+                    raise self._contract_error(
+                        "conflicting_claims",
+                        "facts",
+                        "update conflicts with another same-subject memory",
+                        conflicts,
+                        "resolve the conflict before updating",
+                    )
+                if len(same_subject) > 1 and _allow_claim_replacement:
+                    raise self._contract_error(
+                        "ambiguous_subject", "subject", "upsert target became ambiguous",
+                        [str(row.get("id") or "") for row in same_subject],
+                        "one same-subject memory",
+                    )
+            if content_fields_changed and canonical_content != render_content(existing_memory):
                 kwargs["content"] = canonical_content
-            if patch.category is not None:
+            if patch.category is not None and candidate.category != existing_category:
                 kwargs["category"] = candidate.category
             warning_dicts = [warning.to_dict() for warning in contract_warnings(candidate)]
         else:
             canonical_content = replaced_content
 
-        if patch.relations is not None:
+        if (
+            patch.relations is not None
+            and not self._relation_lists_match(patch.relations, stored_relations)
+        ):
             kwargs["relations"] = [relation.to_dict() for relation in patch.relations]
-        if patch.tags is not None:
+        if patch.tags is not None and list(patch.tags) != (existing.get("tags") or []):
             kwargs["tags"] = list(patch.tags)
-        if patch.quality is not None:
+        if patch.quality is not None and patch.quality != existing.get("quality"):
             kwargs["quality"] = patch.quality
-        if patch.type is not None:
+        if patch.type is not None and patch.type != existing.get("type"):
             kwargs["type"] = patch.type
+
+        if not kwargs:
+            return {
+                "success": True,
+                "status": "idempotent",
+                "memory_id": patch.memory_id,
+                "canonical_content": canonical_content,
+                "replaced_content": replaced_content,
+                "warnings": warning_dicts,
+            }
 
         if not self._apply_update(patch.memory_id, **kwargs):
             raise self._contract_error(

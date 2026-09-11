@@ -245,6 +245,49 @@ class StoreRetentionTests(unittest.TestCase):
             self.store._get_by_id_raw(memory_id)["content"],
         )
 
+    def test_canonically_unchanged_update_is_idempotent_before_embedding(self):
+        memory = self.structured()
+        created = self.store.add_memory(memory)
+        memory_id = created["memory_id"]
+        calls = []
+        self.store._embed = lambda content: calls.append(content) or fake_embed(self.store, content)
+        version_before = self.store._table.version
+
+        result = self.store.update_memory(MemoryPatch.from_mapping({
+            "memory_id": memory_id,
+            "domain": memory.domain,
+            "subject": memory.subject,
+            "facts": list(memory.facts),
+            "tier": memory.tier,
+            "category": memory.category,
+            "relations": [relation.to_dict() for relation in memory.relations],
+        }))
+
+        self.assertEqual("idempotent", result["status"])
+        self.assertEqual(memory_id, result["memory_id"])
+        self.assertEqual([], calls)
+        self.assertEqual(version_before, self.store._table.version)
+
+    def test_quality_and_access_updates_do_not_reembed(self):
+        memory_id = self.store.add_memory(self.structured())["memory_id"]
+        original_vector = np.array(self.store._get_by_id_raw(memory_id)["vector"])
+        calls = []
+        self.store._embed = lambda content: calls.append(content) or fake_embed(self.store, content)
+
+        updated = self.store.update_memory(MemoryPatch.from_mapping({
+            "memory_id": memory_id,
+            "quality": 0.8,
+        }))
+        accessed = self.store.get_by_id(memory_id)
+
+        self.assertEqual("updated", updated["status"])
+        self.assertEqual([], calls)
+        self.assertEqual(1, accessed["access_count"])
+        np.testing.assert_array_equal(
+            original_vector,
+            np.array(self.store._get_by_id_raw(memory_id)["vector"]),
+        )
+
     def test_content_update_preserves_relations_when_patch_omits_them(self):
         target_id = self.add("Project:Target state=active [Tier=2]")
         source_id = self.add(
