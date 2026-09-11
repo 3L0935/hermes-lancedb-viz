@@ -49,6 +49,9 @@ REVIEW_NEAR_DUPLICATE_THRESHOLD = 0.95
 GRAPH_MAX_NODES = 40
 GRAPH_MAX_EDGES = 80
 GRAPH_MAX_SEMANTIC_NEIGHBORS = 30
+# Response budget: a caller-supplied top_k is clamped, never trusted.
+SEARCH_MAX_RESULTS = 50
+SEARCH_MAX_DIAGNOSTIC_ROWS = 50
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 _CANONICAL_ID_RE = re.compile(
@@ -966,6 +969,15 @@ def _build_entity_clustered_graph(store, threshold: float = 0.65) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
+def _clamp_search_top_k(value) -> int:
+    """Clamp a caller-supplied top_k into the declared response budget."""
+    try:
+        requested = int(value)
+    except (TypeError, ValueError):
+        return SEARCH_MAX_RESULTS
+    return min(max(requested, 1), SEARCH_MAX_RESULTS)
+
+
 def search_memories(query: str, top_k: int = 20, diagnostics: bool = False) -> dict:
     """Observable search response without echoing query text."""
     if not query or not query.strip():
@@ -974,7 +986,7 @@ def search_memories(query: str, top_k: int = 20, diagnostics: bool = False) -> d
     try:
         store = _get_store()
         return store.search_with_diagnostics(
-            query, top_k=top_k, diagnostics=diagnostics
+            query, top_k=_clamp_search_top_k(top_k), diagnostics=diagnostics
         )
     except Exception as e:
         return {"error": str(e), "results": []}
@@ -1821,7 +1833,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": str(e)})
         elif path == "/api/search":
             query = params.get("q", [""])[0]
-            top_k = int(params.get("top_k", ["20"])[0])
+            top_k = _clamp_search_top_k(params.get("top_k", ["20"])[0])
             diagnostics = params.get("diagnostics", ["0"])[0] in {"1", "true", "yes"}
             self._send_json(search_memories(query, top_k=top_k, diagnostics=diagnostics))
         elif path == "/api/export":

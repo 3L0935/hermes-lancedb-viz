@@ -596,6 +596,29 @@ class VizRetentionTests(unittest.TestCase):
         self.assertIn("projection_failed", app)
         self.assertIn("PROJECTION_MAX_POINTS = 500", store_source)
 
+    def test_search_response_budget_is_declared_clamped_and_exposed(self):
+        source = (ROOT / "server" / "server.py").read_text()
+        app = (ROOT / "static" / "app.js").read_text()
+
+        # Declared: the response budget is a named constant, not an inline number.
+        self.assertIn("SEARCH_MAX_RESULTS =", source)
+        self.assertIn("SEARCH_MAX_DIAGNOSTIC_ROWS =", source)
+
+        # Enforced: the server clamps a caller-supplied top_k before the store call.
+        self.assertIn("_clamp_search_top_k(", source)
+        self.assertIn("min(max(", source)
+
+        # The clamp is real, not decorative.
+        self.assertEqual(server.SEARCH_MAX_RESULTS, server._clamp_search_top_k(10_000))
+        self.assertEqual(1, server._clamp_search_top_k(0))
+        self.assertEqual(1, server._clamp_search_top_k(-5))
+        self.assertEqual(7, server._clamp_search_top_k(7))
+        # Malformed input clamps instead of raising a 500.
+        self.assertEqual(server.SEARCH_MAX_RESULTS, server._clamp_search_top_k("not-a-number"))
+        self.assertEqual(server.SEARCH_MAX_RESULTS, server._clamp_search_top_k(None))
+        # The HTTP route itself must use the clamp, not a raw int().
+        self.assertIn('_clamp_search_top_k(params.get("top_k"', source)
+
     def test_why_this_result_panel_consumes_c_diagnostics_without_recomputing(self):
         html = (ROOT / "static" / "index.html").read_text()
         graph = (ROOT / "static" / "graph.js").read_text()
