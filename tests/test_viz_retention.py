@@ -596,6 +596,75 @@ class VizRetentionTests(unittest.TestCase):
         self.assertIn("projection_failed", app)
         self.assertIn("PROJECTION_MAX_POINTS = 500", store_source)
 
+    def test_diagnostics_tolerate_both_lancedb_stats_shapes(self):
+        """0.30.2 returns dicts and hides FTS counts behind index_stats()."""
+        from server.maintenance import _stat_value, _fragment_count, _fts_index_stats
+
+        # stats(): dict (0.30.2) and attribute object (0.34.0) must both work.
+        self.assertEqual(1234, _stat_value({"total_bytes": 1234}, "total_bytes"))
+        self.assertEqual(1234, _stat_value(SimpleNamespace(total_bytes=1234), "total_bytes"))
+        self.assertEqual(0, _stat_value({}, "total_bytes"))
+        self.assertEqual(0, _stat_value(None, "total_bytes"))
+        self.assertEqual(0, _stat_value({"total_bytes": "nonsense"}, "total_bytes"))
+
+        # fragments: to_lance() first, dict fallback when pylance is unavailable.
+        class ToLanceBroken:
+            def to_lance(self):
+                raise ImportError("The lance library is required")
+
+            def stats(self):
+                return {"fragment_stats": {"num_fragments": 7}}
+
+        class ToLanceOk:
+            def to_lance(self):
+                return SimpleNamespace(get_fragments=lambda: [1, 2, 3])
+
+        self.assertEqual(7, _fragment_count(ToLanceBroken()))
+        self.assertEqual(3, _fragment_count(ToLanceOk()))
+        self.assertIsNone(_fragment_count(SimpleNamespace(
+            to_lance=lambda: (_ for _ in ()).throw(ImportError("x")),
+            stats=lambda: {},
+        )))
+
+        # FTS counts: object attributes first (0.34), then index_stats (0.30.2).
+        direct = SimpleNamespace(
+            index_type="FTS", columns=["content"],
+            num_indexed_rows=10, num_unindexed_rows=0,
+        )
+
+        class DirectTable:
+            def list_indices(self):
+                return [direct]
+
+        self.assertEqual(
+            {"num_indexed_rows": 10, "num_unindexed_rows": 0},
+            _fts_index_stats(DirectTable()),
+        )
+
+        legacy_index = SimpleNamespace(index_type="FTS", columns=["content"], name="content_idx")
+
+        class LegacyTable:
+            def list_indices(self):
+                return [legacy_index]
+
+            def index_stats(self, name):
+                return SimpleNamespace(num_indexed_rows=42, num_unindexed_rows=0)
+
+        self.assertEqual(
+            {"num_indexed_rows": 42, "num_unindexed_rows": 0},
+            _fts_index_stats(LegacyTable()),
+        )
+
+        # Neither path available: report nothing rather than inventing counts.
+        class NoCounts:
+            def list_indices(self):
+                return [legacy_index]
+
+            def index_stats(self, name):
+                raise AttributeError("'IndexConfig' object has no attribute 'num_unindexed_rows'")
+
+        self.assertIsNone(_fts_index_stats(NoCounts()))
+
     def test_search_response_budget_is_declared_clamped_and_exposed(self):
         source = (ROOT / "server" / "server.py").read_text()
         app = (ROOT / "static" / "app.js").read_text()

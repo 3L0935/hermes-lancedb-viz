@@ -26,7 +26,11 @@ def create_fixture_database(path: Path) -> None:
         table = database.create_table(name, schema=schema)
         table.add([{"id": "aaaaaaaa-aaa", "content": "Project:Alpha state=active [Tier=2]"}])
         if name == "memories":
-            table.create_index("content", config=FTS(), replace=True)
+            # LanceDB 0.30.2 (the container) has no create_index(config=...).
+            try:
+                table.create_index("content", config=FTS(), replace=True)
+            except TypeError:
+                table.create_fts_index("content", replace=True)
 
 
 class MaintenanceTests(unittest.TestCase):

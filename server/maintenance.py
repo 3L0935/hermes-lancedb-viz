@@ -23,6 +23,83 @@ COMPACTION_BACKUP_PREFIX = "lancedb-pre-compact-"
 COMPACTION_BACKUPS_TO_KEEP = 2
 
 
+def _stat_value(stats: Any, key: str, default: int = 0) -> int:
+    """Read one table statistic across LanceDB versions.
+
+    LanceDB 0.30.2 (the container) returns a plain dict from ``table.stats()``,
+    while 0.34.0 returns an object with attributes. Support both.
+    """
+    if stats is None:
+        return default
+    if isinstance(stats, dict):
+        value = stats.get(key, default)
+    else:
+        value = getattr(stats, key, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _fragment_count(table: Any) -> int | None:
+    """Count table fragments, or None when the API is unavailable."""
+    try:
+        return len(table.to_lance().get_fragments())
+    except Exception:
+        pass
+    stats = None
+    try:
+        stats = table.stats()
+    except Exception:
+        return None
+    if isinstance(stats, dict):
+        fragment_stats = stats.get("fragment_stats") or {}
+        if isinstance(fragment_stats, dict):
+            count = fragment_stats.get("num_fragments")
+            if count is not None:
+                try:
+                    return int(count)
+                except (TypeError, ValueError):
+                    return None
+    return None
+
+
+def _fts_index_stats(table: Any) -> dict[str, int] | None:
+    """Return FTS row counts, or None when unavailable.
+
+    LanceDB 0.34.0 exposes ``num_indexed_rows``/``num_unindexed_rows`` directly on
+    the object returned by ``list_indices()``; 0.30.2 exposes those counts only
+    through ``table.index_stats(<name>)``. Never invent the numbers: return None
+    when neither path works.
+    """
+    try:
+        indices = list(table.list_indices())
+    except Exception:
+        return None
+    for index in indices:
+        try:
+            if str(index.index_type).upper() != "FTS" or list(index.columns) != ["content"]:
+                continue
+        except Exception:
+            continue
+        indexed = getattr(index, "num_indexed_rows", None)
+        unindexed = getattr(index, "num_unindexed_rows", None)
+        if indexed is not None and unindexed is not None:
+            return {"num_indexed_rows": int(indexed), "num_unindexed_rows": int(unindexed)}
+        name = getattr(index, "name", None)
+        if not name:
+            continue
+        try:
+            statistics = table.index_stats(name)
+            return {
+                "num_indexed_rows": int(statistics.num_indexed_rows),
+                "num_unindexed_rows": int(statistics.num_unindexed_rows),
+            }
+        except Exception:
+            return None
+    return None
+
+
 def directory_size(path: Path) -> int:
     """Return bytes occupied by regular files below ``path``."""
     if not path.exists():
@@ -209,17 +286,14 @@ def compact_lancedb(
                     compacted_tables=compacted_tables, rows=rows,
                 )
             if name == "memories":
-                fts_indices = [
-                    index for index in table.list_indices()
-                    if str(index.index_type).upper() == "FTS" and list(index.columns) == ["content"]
-                ]
-                if not fts_indices:
+                fts_stats = _fts_index_stats(table)
+                if fts_stats is None:
                     return _failure(
                         "verify.memories.fts", "content FTS index is missing", started,
                         backup_created=str(backup_created), backups_deleted=backups_deleted,
                         compacted_tables=compacted_tables, rows=rows,
                     )
-                fts_unindexed = int(fts_indices[0].num_unindexed_rows)
+                fts_unindexed = fts_stats["num_unindexed_rows"]
                 if fts_unindexed != 0:
                     return _failure(
                         "verify.memories.fts",
@@ -283,26 +357,27 @@ def collect_health_diagnostics(
         try:
             table = database.open_table(name)
             stats = table.stats()
-            table_bytes = int(stats.total_bytes)
+            table_bytes = _stat_value(stats, "total_bytes")
             useful_bytes += table_bytes
+            fragments = _fragment_count(table)
             tables[name] = {
                 "state": "ok",
                 "rows": int(table.count_rows()),
                 "current_version": int(table.version),
                 "versions": len(table.list_versions()),
-                "fragments": len(table.to_lance().get_fragments()),
+                "fragments": fragments,
                 "useful_bytes": table_bytes,
             }
             if name == "memories":
-                for index in table.list_indices():
-                    if str(index.index_type).upper() != "FTS" or list(index.columns) != ["content"]:
-                        continue
+                fts_stats = _fts_index_stats(table)
+                if fts_stats is None:
+                    fts = {"state": "missing", "num_indexed_rows": 0, "num_unindexed_rows": None}
+                else:
                     fts = {
-                        "state": "current" if int(index.num_unindexed_rows) == 0 else "lagging",
-                        "num_indexed_rows": int(index.num_indexed_rows),
-                        "num_unindexed_rows": int(index.num_unindexed_rows),
+                        "state": "current" if fts_stats["num_unindexed_rows"] == 0 else "lagging",
+                        "num_indexed_rows": fts_stats["num_indexed_rows"],
+                        "num_unindexed_rows": fts_stats["num_unindexed_rows"],
                     }
-                    break
         except Exception as error:
             tables[name] = {"state": "error", "error": str(error)[:300]}
 
