@@ -526,3 +526,28 @@ input[type=range] { height: 4px; accent-color: var(--indigo); cursor: pointer; }
 .health-table { grid-column:1 / -1; overflow:auto; }
 .health-estimate { grid-column:1 / -1; padding:9px 11px; border-left:3px solid #f59e0b; background:rgba(245,158,11,.07); color:#cbd5e1; font-size:11px; }
 .health-projection-title { margin-top:8px; }
+
+/* ─── D6 — Why this result? ─── */
+#why-panel {
+  position: fixed; top: 100px; left: 380px;
+  width: 360px; max-height: 460px; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--border-glow); border-radius: 10px;
+  z-index: 101; display: none;
+  box-shadow: 0 0 2px rgba(99,102,241,0.08), 0 0 10px rgba(99,102,241,0.06);
+}
+#why-panel.visible { display: block; }
+.why-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border-bottom:1px solid var(--border); font-size:12px; color:#cbd5e1; }
+.why-close { background:none; border:none; color:var(--dim); font-size:16px; line-height:1; cursor:pointer; padding:0 2px; }
+.why-close:hover { color:var(--red-soft); }
+.why-section { padding:9px 12px; border-bottom:1px solid var(--border); }
+.why-section:last-child { border-bottom:none; }
+.why-section h4 { margin:0 0 6px; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.06em; }
+.why-row { display:grid; grid-template-columns:130px minmax(0,1fr); gap:4px 10px; padding:2px 0; font-size:11px; }
+.why-label { color:#a5b4fc; font:600 11px 'Fira Code', monospace; overflow:hidden; text-overflow:ellipsis; }
+.why-value { color:#e2e8f0; font:11px 'Fira Code', monospace; overflow-wrap:anywhere; }
+.why-other { cursor:pointer; border-radius:4px; padding:2px 4px; margin-left:-4px; }
+.why-other:hover { background:#1e1b4b; }
+.why-note { margin:6px 0 0; color:var(--dim); font-size:10px; line-height:1.4; }
+.search-item .s-why { float:right; margin-left:6px; }
+.why-btn { padding:0 5px; border:1px solid var(--border-glow); border-radius:4px; background:none; color:#a5b4fc; font:700 10px 'Fira Code', monospace; cursor:pointer; }
+.why-btn:hover { border-color:var(--accent); color:#e2e8f0; }

@@ -596,6 +596,35 @@ class VizRetentionTests(unittest.TestCase):
         self.assertIn("projection_failed", app)
         self.assertIn("PROJECTION_MAX_POINTS = 500", store_source)
 
+    def test_why_this_result_panel_consumes_c_diagnostics_without_recomputing(self):
+        html = (ROOT / "static" / "index.html").read_text()
+        graph = (ROOT / "static" / "graph.js").read_text()
+        app = (ROOT / "static" / "app.js").read_text()
+
+        # The panel is an explicit, on-demand surface, not an automatic overlay.
+        self.assertIn('id="why-panel"', html)
+        self.assertIn("function explainResult(", graph)
+        self.assertIn("function closeWhyPanel(", graph)
+
+        # It must read the diagnostics C2 already returns, never invent metrics.
+        self.assertIn("diagnostics=1", graph)
+        self.assertIn("abstention_reason", graph)
+        self.assertIn("score_semantics", graph)
+        self.assertIn("max_cosine_distance", graph)
+        self.assertIn("min_bm25_score", graph)
+        self.assertIn("neighbor_budget", graph)
+        self.assertIn("retrieval_source", graph)
+        self.assertIn("match_type", graph)
+
+        # The RRF rank must never be presented as a probability or a distance.
+        self.assertIn("rrf_rank_not_probability", graph)
+        # No client-side recomputation of the diagnostics contract.
+        self.assertNotIn("cosine_similarity", graph)
+        self.assertNotIn("bm25_score(", graph)
+        # Bounded panel content, consistent with the other viz surfaces.
+        self.assertIn("WHY_PANEL_MAX_ROWS", graph)
+        self.assertIn("escapeHtml", app)
+
     def test_server_has_no_direct_table_update_and_graph_uses_memory_endpoint(self):
         source = (ROOT / "server" / "server.py").read_text()
         graph = (ROOT / "static" / "graph.js").read_text()

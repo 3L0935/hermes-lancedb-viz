@@ -692,25 +692,123 @@ async function doSemanticSearch() {
   const query = document.getElementById('search').value.trim();
   if (!query) return;
   const panel = document.getElementById('search-panel');
+  closeWhyPanel();
   panel.classList.add('visible');
   panel.innerHTML = '<div class="search-empty">Searching...</div>';
   try {
-    const resp = await fetch('/api/search?q=' + encodeURIComponent(query) + '&top_k=15');
+    const resp = await fetch('/api/search?q=' + encodeURIComponent(query) + '&top_k=15&diagnostics=1');
     const data = await resp.json();
     if (data.error) { panel.innerHTML = '<div class="search-empty">Error: ' + escapeHtml(data.error) + '</div>'; return; }
-    if (!data.results.length) { panel.innerHTML = '<div class="search-empty">No results.</div>'; return; }
+    if (!data.results.length) {
+      lastSearchDiagnostics = data;
+      panel.innerHTML = '<div class="search-empty">No reliable result — ' +
+        escapeHtml(data.abstention_reason || 'below_calibrated_evidence') + '. ' +
+        '<button class="btn-neon btn-focus" onclick="explainResult(null)">Why?</button></div>';
+      return;
+    }
+    lastSearchDiagnostics = data;
     panel.innerHTML = data.results.map(r => {
       const cat = catLabels[r.category] || r.category || 'Fact';
-      return '<div class="search-item" onclick="loadNeighborhood(\'' + escapeJsString(r.id) + '\')">' +
+      return '<div class="search-item">' +
         '<span class="s-cat cat-' + safeCategory(r.category) + '">' + escapeHtml(cat) + '</span>' +
         '<span class="s-meta">score: ' + (r._distance ? r._distance.toFixed(2) : '0.00') + '</span>' +
-        '<div class="s-content">' + escapeHtml((r.content || '').substring(0, 140)) + '</div></div>';
+        '<span class="s-why"><button class="why-btn" title="Why this result?" onclick="event.stopPropagation();explainResult(\'' + escapeJsString(r.id) + '\')">?</button></span>' +
+        '<div class="s-content" onclick="loadNeighborhood(\'' + escapeJsString(r.id) + '\')">' + escapeHtml((r.content || '').substring(0, 140)) + '</div></div>';
     }).join('');
   } catch(e) { panel.innerHTML = '<div class="search-empty">Search failed.</div>'; }
 }
 
+// ═══════════════════════════════════════════════
+// D6 — Why this result? (consumes the C2 diagnostics as-is)
+// ═══════════════════════════════════════════════
+
+// The panel renders at most this many result rows; the diagnostics block is a
+// fixed contract, so the surface stays bounded like the other viz panels.
+const WHY_PANEL_MAX_ROWS = 5;
+
+let lastSearchDiagnostics = null;
+
+function closeWhyPanel() {
+  const panel = document.getElementById('why-panel');
+  if (!panel) return;
+  panel.classList.remove('visible');
+  panel.innerHTML = '';
+}
+
+/**
+ * Explain one search outcome using only what the server already computed.
+ * `resultId` selects a row; null explains the abstention of the whole query.
+ * Nothing is recomputed here: no cosine similarity, no BM25 scoring.
+ */
+function explainResult(resultId) {
+  const panel = document.getElementById('why-panel');
+  if (!panel) return;
+  const data = lastSearchDiagnostics;
+  if (!data) { return; }
+  const diagnostics = data.diagnostics || {};
+  const rows = (data.results || []);
+  const selected = resultId ? rows.find(r => String(r.id) === String(resultId)) : null;
+
+  const line = (label, value) =>
+    '<div class="why-row"><span class="why-label">' + escapeHtml(label) + '</span>' +
+    '<span class="why-value">' + escapeHtml(String(value)) + '</span></div>';
+
+  let body = '<div class="why-head"><b>Why this result?</b>' +
+    '<button class="why-close" onclick="closeWhyPanel()" aria-label="Close">×</button></div>';
+
+  body += '<div class="why-section"><h4>Route</h4>';
+  body += line('route', data.route || 'unknown');
+  body += line('degraded', data.degraded ? (data.degraded_reason || 'yes') : 'no');
+  body += line('abstained', data.abstained ? (data.abstention_reason || 'yes') : 'no');
+  body += '</div>';
+
+  if (selected) {
+    body += '<div class="why-section"><h4>This row</h4>';
+    body += line('retrieval_source', selected.retrieval_source || 'direct');
+    body += line('match_type', selected.match_type || diagnostics.metric || 'bm25');
+    body += line('metric', selected.metric || diagnostics.metric || 'bm25');
+    body += line('distance', selected.distance === null || selected.distance === undefined ? 'n/a' : selected.distance);
+    body += line('search_ms', selected.search_ms === undefined ? 'n/a' : selected.search_ms);
+    body += '</div>';
+  }
+
+  body += '<div class="why-section"><h4>Calibrated evidence</h4>';
+  body += line('max_cosine_distance', diagnostics.max_cosine_distance);
+  body += line('min_bm25_score', diagnostics.min_bm25_score);
+  body += line('metric', diagnostics.metric);
+  body += line('neighbor_budget', diagnostics.neighbor_budget);
+  body += line('history_limit', diagnostics.history_limit);
+  body += '</div>';
+
+  // RRF produces a rank, not a probability: say it explicitly, never as a score.
+  body += '<div class="why-section"><h4>Score semantics</h4>';
+  body += line('score_semantics', diagnostics.score_semantics || 'rrf_rank_not_probability');
+  body += '<p class="why-note">Rank fusion orders candidates; it is not a probability and not a distance. Evidence is gated on the calibrated thresholds above.</p>';
+  body += '</div>';
+
+  if (data.timings) {
+    body += '<div class="why-section"><h4>Timings</h4>';
+    body += line('embedding_ms', data.timings.embedding_ms);
+    body += line('search_ms', data.timings.search_ms);
+    body += '</div>';
+  }
+
+  const others = rows.filter(r => !selected || String(r.id) !== String(selected.id)).slice(0, WHY_PANEL_MAX_ROWS);
+  if (others.length) {
+    body += '<div class="why-section"><h4>Other candidates (max ' + WHY_PANEL_MAX_ROWS + ')</h4>';
+    body += others.map(r => '<div class="why-row why-other" onclick="loadNeighborhood(\'' + escapeJsString(r.id) + '\')">' +
+      '<span class="why-label">' + escapeHtml(r.category || 'fact') + '</span>' +
+      '<span class="why-value">' + escapeHtml((r.content || '').substring(0, 80)) + '</span></div>').join('');
+    body += '</div>';
+  }
+
+  panel.innerHTML = body;
+  panel.classList.add('visible');
+}
+
 function closeSearchPanel() {
   document.getElementById('search-panel').classList.remove('visible');
+  closeWhyPanel();
 }
 
 // ═══════════════════════════════════════════════
