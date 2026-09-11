@@ -54,13 +54,11 @@ def _normalized_write_fields(
 _SEARCH_SCHEMA = {
     "name": "lancedb_search",
     "description": (
-        "Semantic search over stored vector memories. "
-        "Returns memories ranked by cosine similarity to your query, "
-        "each result includes a quality score (0-1, auto-calculated from "
-        "access frequency + links + freshness) and relations (typed links "
-        "to related memories). Follow relations of top results for "
-        "additional context. "
-        "Embedding failures return a retryable embedding_failed error instead of results. "
+        "Observable local search over stored memories. RRF ranks hybrid candidates; "
+        "calibrated cosine/BM25 evidence decides whether to abstain. "
+        "Embedding failures degrade explicitly to lexical retrieval. "
+        "Quality is durable utility, freshness is computed separately at read time, "
+        "and declared one-hop relations include their type and direction. "
         "Use this before answering about the user's projects, preferences, "
         "or past decisions — avoids asking questions already stored."
     ),
@@ -90,8 +88,19 @@ _SEARCH_SCHEMA = {
                 "enum": [0, 1],
                 "description": "Typed-relation traversal depth. Only 0 or 1 is supported to keep recall bounded.",
             },
+            "neighbor_budget": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 5,
+                "description": "Maximum declared one-hop neighbors (default and hard max: 5).",
+            },
+            "diagnostics": {
+                "type": "boolean",
+                "description": "Include query-free retrieval diagnostics and retain a bounded local history entry.",
+            },
         },
         "required": ["query"],
+        "additionalProperties": False,
     },
 }
 
@@ -419,7 +428,8 @@ class LanceDBMemoryProvider(MemoryProvider):
             f"# LanceDB Memory\n"
             f"Active. {count} memories stored with vector search and entity linking.\n"
             f"Use lancedb_search to recall context before answering.\n"
-            f"  Each result includes quality (0-1, filter <0.3 as noise) and relations (typed links).\n"
+            f"  Each result separates durable quality, read-time freshness, and tier-1 protection.\n"
+            f"  An empty result explicitly means no reliable result passed calibrated evidence.\n"
             f"  Follow relations of top results for richer context.\n"
             f"Use lancedb_list to list ALL memories with filters (category, tier, quality_min).\n"
             f"  No approximate search — use when you need every entry of a category.\n"
@@ -492,19 +502,19 @@ class LanceDBMemoryProvider(MemoryProvider):
         category = args.get("category", "") or None
         mode = args.get("mode", "auto")
         relation_depth = 1 if int(args.get("relation_depth", 1)) > 0 else 0
+        neighbor_budget = min(max(int(args.get("neighbor_budget", 5)), 0), 5)
+        diagnostics = bool(args.get("diagnostics", False))
         try:
-            results = self._store.search(
+            outcome = self._store.search_with_diagnostics(
                 query,
                 top_k=top_k,
                 category=category,
                 mode=mode,
                 relation_depth=relation_depth,
+                neighbor_budget=neighbor_budget,
+                diagnostics=diagnostics,
             )
-            return json.dumps({
-                "query": query,
-                "count": len(results),
-                "results": results,
-            }, ensure_ascii=False, default=str)
+            return json.dumps(outcome, ensure_ascii=False, default=str)
         except Exception as e:
             return _write_error(e)
 

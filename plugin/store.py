@@ -7,6 +7,7 @@ Embeddings via Ollama (nomic-embed-text), local only.
 from __future__ import annotations
 
 import json
+from collections import deque
 from functools import wraps
 import logging
 import os
@@ -31,6 +32,13 @@ from .memory_contract import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Calibrated on audit/repro/retrieval-questions-calibration.json only.
+# No-answer extrema: cosine distance 0.3072, BM25 score 12.7287.
+SEARCH_MAX_COSINE_DISTANCE = 0.30
+SEARCH_MIN_BM25_SCORE = 12.75
+SEARCH_NEIGHBOR_BUDGET = 5
+SEARCH_DIAGNOSTIC_HISTORY_LIMIT = 100
 
 _MUTATION_LOCKS: dict[str, threading.RLock] = {}
 _MUTATION_LOCKS_GUARD = threading.Lock()
@@ -437,6 +445,9 @@ class LanceDBStore:
         self._table: "lancedb.table.LanceTable" = self._init_table()
         self._conflicts_schema_checked = False
         self._db_size = self._compute_db_size()
+        self._search_diagnostics = deque(maxlen=SEARCH_DIAGNOSTIC_HISTORY_LIMIT)
+
+    SEARCH_DIAGNOSTIC_HISTORY_LIMIT = SEARCH_DIAGNOSTIC_HISTORY_LIMIT
 
     @property
     def db_size(self) -> int:
@@ -2032,43 +2043,32 @@ class LanceDBStore:
                 logger.error("Bulk delete failed for %s: %s", mid, e)
         return {"deleted": deleted, "errors": errors}
 
+    @staticmethod
+    def _tier(memory: dict) -> int:
+        match = re.search(r"\[Tier=([123])\]", str(memory.get("content") or ""))
+        return int(match.group(1)) if match else 3
+
+    def _decorate_read_quality(self, memory: dict) -> dict:
+        """Expose durable utility and read-time freshness as separate signals."""
+        persisted_value = memory.get("persisted_quality", memory.get("quality", 0.5))
+        persisted = 0.5 if persisted_value is None else float(persisted_value)
+        last_access = float(
+            memory.get("accessed_at") or memory.get("created_at") or time.time()
+        )
+        days_since_access = max(0.0, (time.time() - last_access) / 86400)
+        protected = self._tier(memory) == 1
+        memory["persisted_quality"] = persisted
+        memory["freshness"] = round(0.985 ** days_since_access, 4)
+        memory["protected"] = protected
+        memory["quality"] = max(0.5, persisted) if protected else persisted
+        return memory
+
     def _compute_quality(self, memory: dict) -> float:
-        """Compute dynamic quality score based on access_count, links count, age, and decay.
+        """Compatibility accessor for the effective read quality."""
+        return float(self._decorate_read_quality(dict(memory))["quality"])
 
-        Decay: entries not accessed recently lose importance over time.
-        Uses accessed_at (last access) not created_at — a memory accessed yesterday
-        stays fresh even if created months ago. Based on PMB's forgetting curve concept
-        (factor_per_day ~0.985 -> ~50% importance after ~46 days without access).
-        """
-        access_count = memory.get('access_count', 0) or 0
-        links = memory.get('links', [])
-        if isinstance(links, str):
-            try: links = json.loads(links)
-            except: links = []
-        n_links = len(links) if isinstance(links, (list, set)) else 0
-        age_h = (time.time() - (memory.get('created_at', time.time()) or time.time())) / 3600
-
-        # Decay based on time since last access (accessed_at)
-        last_access = memory.get('accessed_at', memory.get('created_at', time.time())) or time.time()
-        days_since_access = max(0, (time.time() - last_access) / 86400)
-        # 0.985^days -> ~1.0 at day 0, ~0.5 at day 46, ~0.25 at day 93
-        decay_factor = 0.985 ** days_since_access
-
-        quality = 0.5
-        if access_count >= 10: quality += 0.2
-        elif access_count >= 5: quality += 0.15
-        elif access_count >= 2: quality += 0.1
-        quality += min(n_links * 0.05, 0.15)
-        if age_h < 168: quality += 0.1
-        elif age_h < 720: quality += 0.05
-        # Apply decay — scale the bonus portion by decay factor, keep base at 0.5*decay
-        # This way a stale memory drops toward 0.1 but never hits exactly 0
-        quality = (quality * decay_factor) + (0.5 * (1.0 - decay_factor) * 0.1)
-        return max(0.1, min(1.0, round(quality, 2)))
-
-    @_serialized_mutation
     def get_by_id(self, memory_id: str) -> dict | None:
-        """Get a memory by ID (vector removed)."""
+        """Get a memory by ID without mutating activity or quality."""
         memory_id = _require_memory_id(memory_id)
         memory_id_literal = _sql_literal(memory_id)
         self._fresh()
@@ -2081,19 +2081,7 @@ class LanceDBStore:
             mem = dict(result[0])
             mem.pop("vector", None)
             self._parse_json_fields(mem)
-            # Increment access count + recalc quality
-            new_access = (mem.get("access_count", 0) or 0) + 1
-            mem["access_count"] = new_access
-            mem["accessed_at"] = time.time()
-            new_quality = self._compute_quality(mem)
-            self._table.update(
-                f"id = {memory_id_literal}",
-                {"access_count": new_access,
-                 "accessed_at": time.time(),
-                 "quality": new_quality},
-            )
-            mem["quality"] = new_quality
-            return mem
+            return self._decorate_read_quality(mem)
         except Exception as e:
             logger.error("get_by_id failed: %s", e)
             return None
@@ -2140,6 +2128,7 @@ class LanceDBStore:
             memories = self._table.search().select(columns).to_list()
             for memory in memories:
                 self._parse_json_fields(memory)
+                self._decorate_read_quality(memory)
             return memories
         except Exception as e:
             logger.error("get_all failed: %s", e)
@@ -2173,52 +2162,69 @@ class LanceDBStore:
 
     def _search_hybrid(self, query: str, top_k: int = 10,
                        category: str | None = None) -> list[dict]:
-        """Run hybrid retrieval or raise before querying on an invalid vector."""
+        """Fuse BM25/vector ranks, then gate candidates on calibrated evidence."""
         self._fresh()
+        embed_started = time.perf_counter()
         vector = self._require_embedding(query, field="query")
+        embedding_ms = (time.perf_counter() - embed_started) * 1000
+        search_started = time.perf_counter()
+        pool = max(20, min(50, top_k * 5))
         try:
-            # Hybrid: vector + BM25 RRF fusion
-            base = (
-                self._table.search(query_type='hybrid')
-                .text(query)
-                .vector(vector.tolist())
-                .limit(top_k)
-            )
-
+            vector_query = self._table.search(vector.tolist()).distance_type("cosine").limit(pool)
             if category:
-                results = base.where(f"category = {_sql_literal(category)}").to_list()
-            else:
-                results = base.to_list()
+                predicate = f"category = {_sql_literal(category)}"
+                vector_query = vector_query.where(predicate)
+            vector_rows = vector_query.to_list()
         except Exception as e:
             logger.error("Search failed: %s", e)
             return []
+        try:
+            lexical_query = self._table.search(query, query_type="fts").limit(pool)
+            if category:
+                lexical_query = lexical_query.where(
+                    f"category = {_sql_literal(category)}"
+                )
+            lexical_rows = lexical_query.to_list()
+        except Exception as error:
+            logger.warning("Lexical branch failed during hybrid search: %s", error)
+            lexical_rows = []
+        search_ms = (time.perf_counter() - search_started) * 1000
+
+        candidates: dict[str, dict] = {}
+        for rank, row in enumerate(vector_rows, 1):
+            item = candidates.setdefault(str(row["id"]), {"row": row, "rrf": 0.0})
+            item["rrf"] += 1.0 / (60 + rank)
+            item["distance"] = float(row.get("_distance", float("inf")))
+        for rank, row in enumerate(lexical_rows, 1):
+            item = candidates.setdefault(str(row["id"]), {"row": row, "rrf": 0.0})
+            item["rrf"] += 1.0 / (60 + rank)
+            item["bm25_score"] = float(row.get("_score", 0.0))
 
         memories = []
-        now = time.time()
-        ids_to_touch = []
-        for r in results:
-            mem = dict(r)
+        ordered = sorted(candidates.values(), key=lambda item: (-item["rrf"], str(item["row"]["id"])))
+        for item in ordered:
+            distance = item.get("distance")
+            bm25_score = item.get("bm25_score")
+            if not (
+                (distance is not None and distance <= SEARCH_MAX_COSINE_DISTANCE)
+                or (bm25_score is not None and bm25_score >= SEARCH_MIN_BM25_SCORE)
+            ):
+                continue
+            mem = dict(item["row"])
             mem.pop("vector", None)
             self._parse_json_fields(mem)
-            mem["score"] = r.get("_relevance_score", 1.0 - mem.get("_distance", 0.0))
-            # Precision gate: skip results with very low relevance score
-            # Hybrid RRF scores are typically 0.015-0.035; below 0.005 is noise
-            if mem["score"] < 0.005:
-                continue
-            mem["accessed_at"] = now if mem.get("accessed_at") is None else mem["accessed_at"]
+            self._decorate_read_quality(mem)
+            mem["score"] = item["rrf"]
+            mem["score_type"] = "rrf"
+            mem["match_type"] = "hybrid" if distance is not None and bm25_score is not None else "vector" if distance is not None else "bm25"
+            mem["metric"] = "cosine"
+            mem["distance"] = distance
+            mem["bm25_score"] = bm25_score
+            mem["embedding_ms"] = round(embedding_ms, 3)
+            mem["search_ms"] = round(search_ms, 3)
             memories.append(mem)
-            ids_to_touch.append(mem["id"])
-        for mid in ids_to_touch:
-            try:
-                existing = self._get_by_id_raw(mid)
-                if existing:
-                    self._table.update(
-                        f"id = {_sql_literal(mid)}",
-                        {"access_count": (existing.get("access_count", 0) or 0) + 1,
-                         "accessed_at": now},
-                    )
-            except Exception:
-                pass
+            if len(memories) >= top_k:
+                break
         return memories
 
     def _search_lexical(self, query: str, top_k: int = 10,
@@ -2244,16 +2250,55 @@ class LanceDBStore:
             memory = dict(row)
             memory.pop("vector", None)
             self._parse_json_fields(memory)
+            self._decorate_read_quality(memory)
             memory["score"] = float(row.get("_score", 1.0 / (rank + 1)))
+            memory["score_type"] = "bm25"
+            memory["match_type"] = "bm25"
+            memory["metric"] = "bm25"
+            memory["distance"] = None
             memories.append(memory)
         return memories
 
+    def _search_exact_literals(self, query: str, top_k: int,
+                               category: str | None = None) -> list[dict]:
+        tokens = []
+        for match in re.finditer(
+            r"(?:~?/|/)[^\s?]+|(?<![\w.-])[A-Za-z][A-Za-z0-9_.-]*=[^\s?]+",
+            query or "",
+        ):
+            token = match.group(0).rstrip(".,;:!\"')]")
+            if len(token) >= 4:
+                tokens.append(token)
+        if not tokens:
+            return []
+        results = []
+        for row in self.get_all():
+            content = str(row.get("content") or "")
+            if category and row.get("category") != category:
+                continue
+            if any(token in content for token in tokens):
+                item = dict(row)
+                item.update({
+                    "score": 1.0,
+                    "score_type": "exact",
+                    "retrieval_source": "direct",
+                    "match_type": "exact_literal",
+                    "match_field": "content",
+                    "metric": "exact",
+                    "distance": 0.0,
+                })
+                results.append(item)
+        return results[:top_k]
+
     def _expand_relation_context(self, direct: list[dict], top_k: int,
-                                 category: str | None = None) -> list[dict]:
+                                 category: str | None = None, *,
+                                 neighbor_budget: int = SEARCH_NEIGHBOR_BUDGET,
+                                 diagnostics: dict | None = None) -> list[dict]:
         """Append one-hop typed neighbors while preserving direct-result priority."""
         results = list(direct[:top_k])
         seen = {str(memory.get("id")) for memory in results}
-        if len(results) >= top_k:
+        budget = max(0, min(int(neighbor_budget), SEARCH_NEIGHBOR_BUDGET, top_k - len(results)))
+        if len(results) >= top_k or budget == 0:
             return results
 
         edges = sorted(
@@ -2266,6 +2311,8 @@ class LanceDBStore:
                 float(edge.get("created_at", 0.0)),
             ),
         )
+        candidates = []
+        suppressed = 0
         for seed in direct:
             seed_id = str(seed.get("id"))
             for edge in edges:
@@ -2278,62 +2325,154 @@ class LanceDBStore:
                     direction = "incoming"
                 if not neighbor_id or neighbor_id in seen:
                     continue
+                relation_type = str(edge["relation_type"])
+                if relation_type in {"supersedes", "invalidates"} and direction == "outgoing":
+                    suppressed += 1
+                    seen.add(neighbor_id)
+                    continue
                 neighbor = self._get_by_id_raw(neighbor_id)
                 if not neighbor or (category and neighbor.get("category") != category):
                     continue
                 neighbor.pop("vector", None)
-                neighbor["score"] = float(seed.get("score", 0.0)) * 0.8
+                self._parse_json_fields(neighbor)
+                self._decorate_read_quality(neighbor)
+                neighbor["score"] = None
+                neighbor["score_type"] = "declared_relation"
                 neighbor["retrieval_source"] = "relation"
-                neighbor["relation_type"] = edge["relation_type"]
+                neighbor["match_type"] = "declared_relation"
+                neighbor["metric"] = "declared_relation"
+                neighbor["distance"] = None
+                neighbor["relation_type"] = relation_type
                 neighbor["relation_direction"] = direction
                 neighbor["relation_seed_id"] = seed_id
-                results.append(neighbor)
+                neighbor["relation_status"] = (
+                    "replacement" if relation_type in {"supersedes", "invalidates"}
+                    else "contradiction" if relation_type == "contradicts"
+                    else "context"
+                )
+                candidates.append(neighbor)
                 seen.add(neighbor_id)
-                if len(results) >= top_k:
-                    return results
+        results.extend(candidates[:budget])
+        if diagnostics is not None:
+            diagnostics["suppressed_invalidated_neighbors"] = suppressed
+            diagnostics["hidden_neighbors"] = max(0, len(candidates) - budget)
         return results
+
+    def get_search_diagnostics(self) -> list[dict]:
+        return list(self._search_diagnostics)
+
+    def search_with_diagnostics(
+        self, query: str, top_k: int = 10, category: str | None = None,
+        mode: str = "auto", relation_depth: int = 1, *,
+        neighbor_budget: int = SEARCH_NEIGHBOR_BUDGET,
+        diagnostics: bool = False,
+    ) -> dict:
+        """Return bounded retrieval results and query-free observability data."""
+        started = time.perf_counter()
+        top_k = max(1, min(int(top_k), 50))
+        relation_diagnostics: dict[str, Any] = {}
+        exact_id = (query or "").strip().strip('"')
+        embedding_ms = 0.0
+        degraded = False
+        degraded_reason = ""
+        abstention_reason = ""
+
+        if is_canonical_memory_id(exact_id):
+            memory = self._get_by_id_raw(exact_id)
+            results = []
+            if memory and (not category or memory.get("category") == category):
+                memory.pop("vector", None)
+                self._parse_json_fields(memory)
+                self._decorate_read_quality(memory)
+                memory.update({"score": 1.0, "score_type": "exact", "retrieval_source": "direct", "search_mode": "lexical", "match_type": "exact_id", "match_field": "id", "metric": "exact", "distance": 0.0})
+                results = [memory]
+            route = "lexical"
+            if not results:
+                abstention_reason = "exact_id_not_found"
+        else:
+            results = self._search_exact_literals(query, top_k, category)
+            route = route_search_mode(query) if mode == "auto" else mode
+            if results:
+                route = "lexical"
+            else:
+                if route not in {"hybrid", "lexical", "graph"}:
+                    route = "hybrid"
+                seed_limit = max(1, min(5, (top_k + 1) // 2)) if route == "graph" and relation_depth > 0 else top_k
+                if route == "lexical":
+                    results = self._search_lexical(query, seed_limit, category)
+                else:
+                    try:
+                        results = self._search_hybrid(query, seed_limit, category)
+                        embedding_ms = max((float(row.get("embedding_ms", 0.0)) for row in results), default=0.0)
+                    except MemoryEmbeddingError:
+                        results = self._search_lexical(query, seed_limit, category)
+                        route = "lexical"
+                        degraded = True
+                        degraded_reason = "embedding_unavailable"
+                for memory in results:
+                    memory.setdefault("retrieval_source", "direct")
+                    memory["search_mode"] = route
+                if route == "graph" and relation_depth > 0:
+                    results = self._expand_relation_context(
+                        results, top_k, category,
+                        neighbor_budget=neighbor_budget,
+                        diagnostics=relation_diagnostics,
+                    )
+
+        if not results and not abstention_reason:
+            abstention_reason = "below_calibrated_evidence"
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        for memory in results:
+            memory.setdefault("retrieval_source", "direct")
+            memory.setdefault("match_type", "bm25")
+            memory.setdefault("metric", "bm25")
+            memory.setdefault("distance", None)
+            memory["route"] = route
+            memory["degraded"] = degraded
+            memory["embedding_ms"] = round(float(memory.get("embedding_ms", embedding_ms)), 3)
+            memory["search_ms"] = round(elapsed_ms, 3)
+        outcome = {
+            "success": True,
+            "count": len(results),
+            "results": results,
+            "route": route,
+            "degraded": degraded,
+            "degraded_reason": degraded_reason,
+            "abstained": not results,
+            "abstention_reason": abstention_reason,
+            "message": "aucun résultat fiable" if not results else "results found",
+            "timings": {
+                "embedding_ms": round(embedding_ms, 3),
+                "search_ms": round(elapsed_ms, 3),
+            },
+        }
+        if diagnostics:
+            outcome["diagnostics"] = {
+                "metric": "cosine",
+                "max_cosine_distance": SEARCH_MAX_COSINE_DISTANCE,
+                "min_bm25_score": SEARCH_MIN_BM25_SCORE,
+                "neighbor_budget": min(max(int(neighbor_budget), 0), SEARCH_NEIGHBOR_BUDGET),
+                "history_limit": SEARCH_DIAGNOSTIC_HISTORY_LIMIT,
+                "score_semantics": "rrf_rank_not_probability",
+                **relation_diagnostics,
+            }
+            self._search_diagnostics.append({
+                "timestamp": time.time(),
+                "route": route,
+                "result_ids": [str(row.get("id", "")) for row in results],
+                "degraded": degraded,
+                "abstention_reason": abstention_reason,
+                "timings": dict(outcome["timings"]),
+            })
+        return outcome
 
     def search(self, query: str, top_k: int = 10, category: str | None = None,
                mode: str = "auto", relation_depth: int = 1) -> list[dict]:
         """Search locally with deterministic routing and optional one-hop expansion."""
-        exact_id = (query or "").strip().strip('"')
-        if is_canonical_memory_id(exact_id):
-            memory = self._get_by_id_raw(exact_id)
-            if not memory or (category and memory.get("category") != category):
-                return []
-            memory.pop("vector", None)
-            memory["score"] = 1.0
-            memory["retrieval_source"] = "direct"
-            memory["search_mode"] = "lexical"
-            memory["match_field"] = "id"
-            return [memory]
-
-        selected_mode = route_search_mode(query) if mode == "auto" else mode
-        if selected_mode not in {"hybrid", "lexical", "graph"}:
-            selected_mode = "hybrid"
-        seed_limit = (
-            max(1, min(5, (top_k + 1) // 2))
-            if selected_mode == "graph" and relation_depth > 0
-            else top_k
-        )
-        direct = (
-            self._search_lexical(query, seed_limit, category)
-            if selected_mode == "lexical"
-            else self._search_hybrid(query, seed_limit, category)
-        )
-        routing_fallback = ""
-        if selected_mode == "lexical" and not direct:
-            direct = self._search_hybrid(query, seed_limit, category)
-            selected_mode = "hybrid"
-            routing_fallback = "lexical_empty"
-        for memory in direct:
-            memory["retrieval_source"] = "direct"
-            memory["search_mode"] = selected_mode
-            if routing_fallback:
-                memory["routing_fallback"] = routing_fallback
-        if selected_mode == "graph" and relation_depth > 0:
-            return self._expand_relation_context(direct, top_k, category)
-        return direct[:top_k]
+        return self.search_with_diagnostics(
+            query, top_k=top_k, category=category, mode=mode,
+            relation_depth=relation_depth,
+        )["results"]
 
     def graph(self) -> dict:
         """Return all memories as graph nodes + edges (entity-based links)."""
@@ -2642,9 +2781,9 @@ class LanceDBStore:
         stale = []
         for m in memories:
             created = m.get("created_at", now)
-            persisted_quality = m.get("quality", 0.5)
-            quality = self._compute_quality(m)
-            if created < cutoff and quality <= quality_max:
+            persisted_quality = m.get("persisted_quality", m.get("quality", 0.5))
+            quality = m.get("quality", persisted_quality)
+            if not m.get("protected") and created < cutoff and quality <= quality_max:
                 item = dict(m)
                 item["persisted_quality"] = persisted_quality
                 item["quality"] = quality

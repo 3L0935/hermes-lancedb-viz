@@ -44,6 +44,22 @@ class RecordingStore:
             raise self.search_error
         return []
 
+    def search_with_diagnostics(self, *_args, **_kwargs):
+        if self.search_error:
+            raise self.search_error
+        return {
+            "success": True,
+            "count": 0,
+            "results": [],
+            "route": "hybrid",
+            "degraded": False,
+            "degraded_reason": "",
+            "abstained": True,
+            "abstention_reason": "below_calibrated_evidence",
+            "message": "aucun résultat fiable",
+            "timings": {"embedding_ms": 0.0, "search_ms": 1.0},
+        }
+
 
 class ProviderFormattingTests(unittest.TestCase):
     def setUp(self):
@@ -164,6 +180,18 @@ class ProviderFormattingTests(unittest.TestCase):
         self.assertTrue(payload["retryable"])
         self.assertEqual("embedding_failed", payload["error"]["code"])
         self.assertEqual("query", payload["error"]["field"])
+
+    def test_search_response_omits_query_and_accepts_opt_in_diagnostics(self):
+        schema = self.schema("lancedb_search")
+        self.assertIn("diagnostics", schema["properties"])
+
+        payload = json.loads(self.provider.handle_tool_call(
+            "lancedb_search",
+            {"query": "private query", "diagnostics": True},
+        ))
+
+        self.assertNotIn("query", payload)
+        self.assertEqual("aucun résultat fiable", payload["message"])
 
     def test_update_handler_uses_typed_patch_and_echoes_replaced_content(self):
         payload = json.loads(self.provider.handle_tool_call(

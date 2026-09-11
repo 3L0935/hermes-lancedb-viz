@@ -328,7 +328,7 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertEqual("updated", result["status"])
         self.assertEqual("insight", self.store._get_by_id_raw(memory_id)["category"])
 
-    def test_quality_and_access_updates_do_not_reembed(self):
+    def test_quality_update_and_detail_read_do_not_reembed_or_touch(self):
         memory_id = self.store.add_memory(self.structured())["memory_id"]
         original_vector = np.array(self.store._get_by_id_raw(memory_id)["vector"])
         calls = []
@@ -342,13 +342,14 @@ class StoreRetentionTests(unittest.TestCase):
 
         self.assertEqual("updated", updated["status"])
         self.assertEqual([], calls)
-        self.assertEqual(1, accessed["access_count"])
+        self.assertEqual(0, accessed["access_count"])
+        self.assertEqual(0.8, accessed["persisted_quality"])
         np.testing.assert_array_equal(
             original_vector,
             np.array(self.store._get_by_id_raw(memory_id)["vector"]),
         )
 
-    def test_stale_filter_uses_same_recalculated_quality_as_detail_reads(self):
+    def test_stale_filter_does_not_treat_age_as_low_quality(self):
         memory_id = self.store.add_memory(self.structured())["memory_id"]
         old = 1_600_000_000.0
         self.store._table.update(
@@ -358,9 +359,10 @@ class StoreRetentionTests(unittest.TestCase):
 
         stale = self.store.get_stale(days=90, quality_max=0.3)
 
-        self.assertEqual([memory_id], [memory["id"] for memory in stale])
-        self.assertLessEqual(stale[0]["quality"], 0.3)
-        self.assertEqual(0.5, stale[0]["persisted_quality"])
+        self.assertEqual([], stale)
+        memory = self.store.get_by_id(memory_id)
+        self.assertEqual(0.5, memory["persisted_quality"])
+        self.assertLess(memory["freshness"], 0.01)
 
     def test_content_update_preserves_relations_when_patch_omits_them(self):
         target_id = self.add("Project:Target state=active [Tier=2]")
@@ -455,34 +457,89 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertEqual("lexical", route_search_mode("an exact result"))
         self.assertEqual("graph", route_search_mode("a related topic"))
 
-    def test_empty_lexical_branch_falls_back_to_hybrid(self):
+    def test_empty_exact_lexical_branch_abstains_without_approximate_fallback(self):
         hybrid = [{"id": "memory-1", "score": 0.4}]
         self.store._search_lexical = lambda query, top_k, category: []
         self.store._search_hybrid = lambda query, top_k, category: hybrid
 
         results = self.store.search("exact missing phrase", top_k=3, mode="auto")
 
-        self.assertEqual(["memory-1"], [result["id"] for result in results])
-        self.assertEqual("hybrid", results[0]["search_mode"])
-        self.assertEqual("lexical_empty", results[0]["routing_fallback"])
+        self.assertEqual([], results)
 
-    def test_search_rejects_zero_embedding_before_vector_query(self):
+    def test_hybrid_embedding_failure_degrades_to_explicit_lexical_results(self):
+        memory_id = self.add("Project:Alpha state=active [Tier=2]")
+        self.store._embed = lambda _query: np.zeros(768, dtype=np.float32)
+
+        outcome = self.store.search_with_diagnostics(
+            "Project Alpha", top_k=5, mode="hybrid", diagnostics=True
+        )
+
+        self.assertEqual([memory_id], [row["id"] for row in outcome["results"]])
+        self.assertTrue(outcome["degraded"])
+        self.assertEqual("embedding_unavailable", outcome["degraded_reason"])
+        self.assertEqual("lexical", outcome["route"])
+        self.assertNotIn("query", outcome)
+
+    def test_unrelated_hybrid_query_abstains_below_calibrated_evidence(self):
+        self.add("Project:Alpha state=active [Tier=2]")
+        self.store._embed = lambda _query: np.pad(
+            np.array([0.0, 1.0], dtype=np.float32), (0, 766)
+        )
+
+        outcome = self.store.search_with_diagnostics(
+            "lunar telemetry gateway", mode="hybrid", diagnostics=True
+        )
+
+        self.assertEqual([], outcome["results"])
+        self.assertTrue(outcome["abstained"])
+        self.assertEqual("below_calibrated_evidence", outcome["abstention_reason"])
+        self.assertEqual("aucun résultat fiable", outcome["message"])
+
+    def test_exact_path_is_retrieved_without_embedding(self):
+        memory_id = self.add("Project:Alpha path=/tmp/Alpha [Tier=2]")
+        self.store._embed = lambda _query: (_ for _ in ()).throw(
+            AssertionError("exact literal lookup must not embed")
+        )
+
+        outcome = self.store.search_with_diagnostics(
+            "Where is /tmp/Alpha?", mode="auto", diagnostics=True
+        )
+
+        self.assertEqual([memory_id], [row["id"] for row in outcome["results"]])
+        self.assertEqual("exact_literal", outcome["results"][0]["match_type"])
+        self.assertEqual(0, outcome["timings"]["embedding_ms"])
+
+    def test_diagnostic_history_is_opt_in_bounded_and_has_no_query_text(self):
+        memory_id = self.add("Project:Alpha state=active [Tier=2]")
+
+        for _ in range(3):
+            outcome = self.store.search_with_diagnostics(memory_id, diagnostics=False)
+        self.assertEqual([], self.store.get_search_diagnostics())
+
+        for _ in range(self.store.SEARCH_DIAGNOSTIC_HISTORY_LIMIT + 3):
+            outcome = self.store.search_with_diagnostics(memory_id, diagnostics=True)
+
+        history = self.store.get_search_diagnostics()
+        self.assertEqual(self.store.SEARCH_DIAGNOSTIC_HISTORY_LIMIT, len(history))
+        self.assertFalse(any("query" in item for item in history))
+        self.assertFalse(any("query" in item for item in outcome.values() if isinstance(item, dict)))
+
+    def test_search_degrades_on_zero_embedding_before_vector_query(self):
         self.add("Project:Alpha state=active [Tier=2]")
         vector_searches = []
         original_search = self.store._table.search
 
         def tracked_search(*args, **kwargs):
-            if kwargs.get("query_type") == "hybrid":
+            if args and not isinstance(args[0], str):
                 vector_searches.append(True)
             return original_search(*args, **kwargs)
 
         self.store._embed = lambda _query: np.zeros(768, dtype=np.float32)
         with patch.object(self.store._table, "search", side_effect=tracked_search):
-            with self.assertRaises(MemoryEmbeddingError) as caught:
-                self.store.search("semantic query", mode="hybrid")
+            outcome = self.store.search_with_diagnostics("semantic query", mode="hybrid")
 
-        self.assertEqual("embedding_failed", caught.exception.issue.code)
-        self.assertEqual("query", caught.exception.issue.field)
+        self.assertTrue(outcome["degraded"])
+        self.assertEqual("embedding_unavailable", outcome["degraded_reason"])
         self.assertEqual([], vector_searches)
 
     def test_search_normalizes_embedding_before_vector_query(self):
@@ -491,15 +548,8 @@ class StoreRetentionTests(unittest.TestCase):
 
         def tracked_search(*args, **kwargs):
             query = original_search(*args, **kwargs)
-            if kwargs.get("query_type") != "hybrid":
-                return query
-            original_vector = query.vector
-
-            def tracked_vector(vector):
-                vector_norms.append(float(np.linalg.norm(vector)))
-                return original_vector(vector)
-
-            query.vector = tracked_vector
+            if args and not isinstance(args[0], str):
+                vector_norms.append(float(np.linalg.norm(args[0])))
             return query
 
         self.store._embed = lambda _query: np.full(768, 3.0, dtype=np.float32)
@@ -555,6 +605,70 @@ class StoreRetentionTests(unittest.TestCase):
 
         self.assertEqual(["seed", "a", "z"], [row["id"] for row in first])
         self.assertEqual([row["id"] for row in first], [row["id"] for row in second])
+
+    def test_relation_expansion_suppresses_invalidated_target_and_reports_budget(self):
+        direct = [{"id": "new", "score": 1.0}]
+        diagnostics = {}
+        self.store.get_typed_edges = lambda: [
+            {"from": "new", "to": "old", "relation_type": "supersedes", "target_label": "Old", "created_at": 1.0},
+            {"from": "new", "to": "dep", "relation_type": "depends", "target_label": "Dep", "created_at": 2.0},
+            {"from": "new", "to": "extra", "relation_type": "uses", "target_label": "Extra", "created_at": 3.0},
+        ]
+        self.store._get_by_id_raw = lambda memory_id: {
+            "id": memory_id, "content": f"Project:{memory_id} state=active [Tier=2]", "category": "project"
+        }
+
+        results = self.store._expand_relation_context(
+            direct, 5, neighbor_budget=1, diagnostics=diagnostics
+        )
+
+        self.assertEqual(["new", "dep"], [row["id"] for row in results])
+        self.assertEqual("declared_relation", results[1]["match_type"])
+        self.assertEqual("depends", results[1]["relation_type"])
+        self.assertEqual(1, diagnostics["suppressed_invalidated_neighbors"])
+        self.assertEqual(1, diagnostics["hidden_neighbors"])
+
+    def test_relation_expansion_surfaces_incoming_replacement_as_nonordinary_context(self):
+        direct = [{"id": "old", "score": 1.0}]
+        self.store.get_typed_edges = lambda: [{
+            "from": "new", "to": "old", "relation_type": "supersedes",
+            "target_label": "Old", "created_at": 1.0,
+        }]
+        self.store._get_by_id_raw = lambda memory_id: {
+            "id": memory_id, "content": "Project:New state=active [Tier=1]",
+            "category": "project",
+        }
+
+        results = self.store._expand_relation_context(direct, 2)
+
+        self.assertEqual(["old", "new"], [row["id"] for row in results])
+        self.assertEqual("incoming", results[1]["relation_direction"])
+        self.assertEqual("replacement", results[1]["relation_status"])
+
+    def test_hybrid_search_is_read_only(self):
+        self.add("Project:Alpha state=active [Tier=2]")
+        version = self.store._table.version
+
+        self.store.search_with_diagnostics("Project Alpha", mode="hybrid")
+
+        self.assertEqual(version, self.store._table.version)
+
+    def test_read_quality_is_separate_fresh_and_tier_one_is_protected(self):
+        memory_id = self.add("Rule:Critical state=active [Tier=1]", category="correction")
+        self.store._table.update(
+            f"id = '{memory_id}'",
+            {"quality": 0.1, "accessed_at": 1.0, "created_at": 1.0},
+        )
+        self.store._fresh()
+        version = self.store._table.version
+
+        memory = self.store.get_by_id(memory_id)
+
+        self.assertEqual(version, self.store._table.version)
+        self.assertEqual(0.1, memory["persisted_quality"])
+        self.assertGreaterEqual(memory["quality"], 0.5)
+        self.assertLess(memory["freshness"], 0.01)
+        self.assertTrue(memory["protected"])
 
     def test_graph_search_expands_one_hop_with_direct_result_first(self):
         alpha_id = self.add("Project:Alpha state=active [Tier=2]")

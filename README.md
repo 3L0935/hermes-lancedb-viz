@@ -220,19 +220,18 @@ See [docs/skills/memory-writing.md](docs/skills/memory-writing.md) for the full 
 
 ### Quality score
 
-Dynamic score (0-1) computed at each access:
+Retrieval exposes separate read-only signals instead of rewriting quality when
+a result or detail view is opened:
 
-| Factor | Effect |
-|--------|--------|
-| Access frequency | +0.1 to +0.2 (>=2/>=5/>=10 accesses) |
-| Entity links | +0.05 per link (max +0.15) |
-| Creation freshness | +0.1 (<7d) / +0.05 (<30d) |
-| **Decay curve** | **0.985^days since last access** (~50% after 46d, ~25% after 93d) |
+| Field | Meaning |
+|-------|---------|
+| `persisted_quality` | Durable utility value stored with the memory |
+| `freshness` | Read-time `0.985^days since accessed_at`, never persisted by a read |
+| `protected` | True for tier-1 critical rules and corrections |
+| `quality` | Effective utility; tier-1 entries have a 0.5 floor |
 
-Stale memories drop toward 0.1 but never hit 0. Re-accessing a memory resets the decay clock.
-The stale view recomputes this score through the same `_compute_quality()`
-function as detail access and exposes the previous stored value as
-`persisted_quality`; the read-only maintenance view does not write it back.
+Age alone does not make a memory false or low-quality. Detail, list, lexical,
+and hybrid reads use the same decoration path and do not create MVCC versions.
 
 ### Mutation concurrency
 

@@ -30,6 +30,16 @@ class FakeStore:
         self.calls.append((conflict_id, resolution_note, resolved_by))
         return True
 
+    def search_with_diagnostics(self, query, top_k=20, diagnostics=False, **_kwargs):
+        self.calls.append(("search", top_k, diagnostics))
+        return {
+            "success": True, "count": 0, "results": [], "route": "hybrid",
+            "degraded": False, "degraded_reason": "", "abstained": True,
+            "abstention_reason": "below_calibrated_evidence",
+            "message": "aucun résultat fiable",
+            "timings": {"embedding_ms": 0.0, "search_ms": 1.0},
+        }
+
 
 class FakeUpdateStore:
     def __init__(self):
@@ -66,6 +76,13 @@ class VizRetentionTests(unittest.TestCase):
 
         archived = server.api_get_conflicts({"status": "archived", "limit": "25"})
         self.assertEqual([{"id": CONFLICT_ID, "status": "archived"}], archived)
+
+    def test_search_api_omits_query_text_and_forwards_diagnostic_opt_in(self):
+        result = server.search_memories("private query", top_k=7, diagnostics=True)
+
+        self.assertNotIn("query", result)
+        self.assertTrue(result["abstained"])
+        self.assertEqual(("search", 7, True), self.store.calls[-1])
 
     def test_conflict_resolution_api_is_auditable(self):
         result = server.api_resolve_conflict(CONFLICT_ID, {

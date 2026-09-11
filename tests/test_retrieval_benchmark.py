@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -49,6 +50,18 @@ class RetrievalBenchmarkTests(unittest.TestCase):
         calibration_ids = {question["id"] for question in calibration["questions"]}
         final_ids = {question["id"] for question in final["questions"]}
         self.assertTrue(calibration_ids.isdisjoint(final_ids))
+
+        calibration_report = json.loads(
+            (ROOT / "audit" / "repro" / "retrieval-calibration.json").read_text()
+        )
+        self.assertEqual(
+            0.3,
+            calibration_report["selected_thresholds"]["maximum_cosine_distance"],
+        )
+        self.assertEqual(
+            12.75,
+            calibration_report["selected_thresholds"]["minimum_bm25_score"],
+        )
 
     def test_metrics_are_deterministic_and_exclude_no_answer_from_recall(self):
         benchmark = load_benchmark_module()

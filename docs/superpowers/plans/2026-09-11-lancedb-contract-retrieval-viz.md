@@ -129,10 +129,10 @@
 - Modify: `server/server.py`
 - Modify: retrieval/store/provider/server tests
 
-- [ ] Add red tests for exact generated IDs, trivial BM25 matches, invalid/zero embeddings, explicit degraded lexical fallback, calibrated abstention, typed/directed one-hop provenance, and strict neighbor budgets.
-- [ ] Return route, match type, metric/distance, embedding/search timings, degraded state, and abstention reason without query text by default.
-- [ ] Keep bounded local history only when diagnostics are requested.
-- [ ] Run focused and full tests.
+- [x] Add red tests for exact generated IDs, trivial BM25 matches, invalid/zero embeddings, explicit degraded lexical fallback, calibrated abstention, typed/directed one-hop provenance, and strict neighbor budgets.
+- [x] Return route, match type, metric/distance, embedding/search timings, degraded state, and abstention reason without query text by default.
+- [x] Keep bounded local history only when diagnostics are requested.
+- [x] Run focused and full tests.
 
 ## Task C3: Benchmark and promotion gate
 

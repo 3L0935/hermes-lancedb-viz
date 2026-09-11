@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "question_set": "retrieval-questions-calibration.json",
+  "source_fixture": {
+    "memories_version": 112588,
+    "memory_edges_version": 275,
+    "rows": 472
+  },
+  "metric": "cosine",
+  "rrf_role": "ranking_only",
+  "no_answer_observed_extrema": {
+    "minimum_top_cosine_distance": 0.3072,
+    "maximum_top_bm25_score": 12.7287
+  },
+  "selected_thresholds": {
+    "maximum_cosine_distance": 0.3,
+    "minimum_bm25_score": 12.75
+  },
+  "decision": "A candidate must pass at least one interpretable threshold. Exact IDs and exact literal paths or key=value tokens bypass semantic scoring. Thresholds were selected on calibration only; the final split was frozen first and was not inspected for tuning."
+}
