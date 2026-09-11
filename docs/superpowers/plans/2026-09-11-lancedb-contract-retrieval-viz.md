@@ -117,9 +117,9 @@
 - Create: `audit/repro/retrieval-questions-final.json`
 - Create: `audit/repro/benchmark-retrieval.py`
 
-- [ ] Read only projected metadata from the live table and copy selected rows into a dedicated `/tmp` LanceDB fixture; record no private row text in committed files.
-- [ ] Author 30–50 FR/EN questions spanning project name, ID, exact path, config, paraphrase, dependency, old critical correction, contradiction, and no-answer.
-- [ ] Freeze the final split before tuning and implement deterministic Recall@5, MRR, no-answer false-result rate, context size, embedding-call count, and timing collection.
+- [x] Read only projected metadata from the live table and copy selected rows into a dedicated `/tmp` LanceDB fixture; record no private row text in committed files.
+- [x] Author 30–50 FR/EN questions spanning project name, ID, exact path, config, paraphrase, dependency, old critical correction, contradiction, and no-answer.
+- [x] Freeze the final split before tuning and implement deterministic Recall@5, MRR, no-answer false-result rate, context size, embedding-call count, and timing collection.
 
 ## Task C2: Implement observable retrieval candidates
 

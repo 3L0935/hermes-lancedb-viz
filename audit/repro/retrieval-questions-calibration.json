@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "split": "calibration",
+  "frozen": false,
+  "source_snapshot": {
+    "database": "~/.hermes/lancedb",
+    "table": "memories",
+    "version_observed": 112588,
+    "rows_observed": 472,
+    "selection_basis": "read-only projected IDs, categories, relation metadata, public project names, paths, and configuration keys"
+  },
+  "questions": [
+    {"id":"cal-01","language":"fr","category":"project_name","query":"Que sais-tu du projet GlassForge ?","expected_ids":["f6f1b4d7-b2e"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-02","language":"en","category":"id","query":"f6f1b4d7-b2e","expected_ids":["f6f1b4d7-b2e"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-03","language":"fr","category":"exact_path","query":"Quel projet utilise exactement ~/github/nightlight-enhanced/ ?","expected_ids":["797d9644-b77"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-04","language":"en","category":"config","query":"Which CrowdWhisper Analyzer entry sets port=8080?","expected_ids":["95cb71fe-22d"],"avoid_ids":["a836b833-44b"],"expect_abstain":false},
+    {"id":"cal-05","language":"fr","category":"paraphrase","query":"Quelle correction réduit le poids du serveur vault-mcp en remplaçant sentence-transformers ?","expected_ids":["4b6449e2-fa7"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-06","language":"en","category":"dependency","query":"Which BloodReaver project memory declares a dependency on Unity?","expected_ids":["81b8f203-16f","31d957f9-faa"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-07","language":"fr","category":"old_critical_correction","query":"Retrouve la correction critique System:SudoFaillock.","expected_ids":["55313d48-135"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-08","language":"en","category":"contradiction","query":"Which two Bodycam:Bodycam memories disagree on path between bodycam-reviews-notes.md and tendance-semaine-notes.md?","expected_ids":["f785a800-5f0","94d87ee5-7fe"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-09","language":"fr","category":"no_answer","query":"Quel est le numéro de série du rover martien du projet Aurore ?","expected_ids":[],"avoid_ids":[],"expect_abstain":true},
+    {"id":"cal-10","language":"en","category":"project_name","query":"Find the Vigil project memory.","expected_ids":["6f99104c-e33"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-11","language":"fr","category":"exact_path","query":"Quelle intégration utilise ~/.local/bin/herdr-dev ?","expected_ids":["00b8e26c-abb"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-12","language":"en","category":"config","query":"Which CV project memory has version=V6?","expected_ids":["e836f678-fdf"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-13","language":"fr","category":"paraphrase","query":"Comment Hermes appelle-t-il Ollama pour générer du texte et des embeddings ?","expected_ids":["243b8ac0-c57"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-14","language":"en","category":"dependency","query":"Which tier-1 Hermes configuration depends on LLM:Ollama?","expected_ids":["aa86e768-fa5"],"avoid_ids":["e8600cb8-9ed"],"expect_abstain":false},
+    {"id":"cal-15","language":"fr","category":"old_critical_correction","query":"Quelle correction Hermes-Hub impose le préfixe /api/service/ ?","expected_ids":["131c85aa-a35"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-16","language":"en","category":"contradiction","query":"Find the conflicting Correction:LanceDB records for the cause values ne_affiche_plus_memoires and from.","expected_ids":["92395fa2-c63","a64a7811-756"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-17","language":"en","category":"no_answer","query":"What is the production Kubernetes namespace for GlassForge?","expected_ids":[],"avoid_ids":[],"expect_abstain":true},
+    {"id":"cal-18","language":"fr","category":"id","query":"9e28426f-d039-4636-9cd8-576488039b89","expected_ids":["9e28426f-d039-4636-9cd8-576488039b89"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-19","language":"en","category":"exact_path","query":"Which daily review uses ~/.hermes/scripts/daily-review.sh?","expected_ids":["58d4fc16-7af"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"cal-20","language":"fr","category":"no_answer","query":"Quelle est la clé API de production du service Neptune ?","expected_ids":[],"avoid_ids":[],"expect_abstain":true}
+  ]
+}

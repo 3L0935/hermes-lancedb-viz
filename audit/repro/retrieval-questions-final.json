@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "split": "final",
+  "frozen": true,
+  "frozen_at": "2026-09-11T00:00:00+02:00",
+  "source_snapshot": {
+    "database": "~/.hermes/lancedb",
+    "table": "memories",
+    "version_observed": 112588,
+    "rows_observed": 472,
+    "selection_basis": "read-only projected IDs, categories, relation metadata, public project names, paths, and configuration keys"
+  },
+  "questions": [
+    {"id":"final-01","language":"en","category":"project_name","query":"What is recorded about ModToolLauncher?","expected_ids":["214186fe-2db"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-02","language":"fr","category":"id","query":"ab830880-7b4","expected_ids":["ab830880-7b4"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-03","language":"en","category":"exact_path","query":"Which project lives at ~/github/hermes-radio/?","expected_ids":["e9246681-f4b"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-04","language":"fr","category":"config","query":"Quelle mémoire Bodycam contient path=~/.hermes/cron/output/tendance-semaine-notes.md ?","expected_ids":["94d87ee5-7fe"],"avoid_ids":["f785a800-5f0"],"expect_abstain":false},
+    {"id":"final-05","language":"en","category":"paraphrase","query":"Where is the rule that repositories are authoritative and deployed Hermes plugins are only runtime copies?","expected_ids":["4807b527-c7e"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-06","language":"fr","category":"dependency","query":"Quel projet T3-Code dépend à la fois de LLM:MCP et LLM:Ollama ?","expected_ids":["80f11213-328"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-07","language":"en","category":"old_critical_correction","query":"Find the critical FeatureUpvote Workdir_Skill_Dir correction about the vague5 work directory.","expected_ids":["cc1bfc95-624"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-08","language":"fr","category":"contradiction","query":"Quelles mémoires Projet:Hermes-Hub se contredisent sur path entre ~/github/hermes-hub/server.py et ~/github/hub-services/ ?","expected_ids":["bfa70478-d18","7826130d-23f"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-09","language":"en","category":"no_answer","query":"What is the PagerDuty escalation policy for the T3-Code production cluster?","expected_ids":[],"avoid_ids":[],"expect_abstain":true},
+    {"id":"final-10","language":"fr","category":"project_name","query":"Retrouve le projet CrowdWhisper basé sur FastAPI, Jinja2 et SQL.","expected_ids":["e123b33b-2f9"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-11","language":"en","category":"id","query":"f07284c5-6b54-4859-8","expected_ids":["f07284c5-6b54-4859-8"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-12","language":"fr","category":"exact_path","query":"Quel projet se trouve exactement dans /home/elo/github/INCM/mission-editor/ ?","expected_ids":["b40a9d45-ee8"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-13","language":"en","category":"config","query":"Which system record has OS=CachyOS/Arch?","expected_ids":["93f95a21-919"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-14","language":"fr","category":"paraphrase","query":"Où faut-il installer les dossiers core et plugins de BepInEx pour INCM ?","expected_ids":["946eb8cc-da0"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-15","language":"en","category":"dependency","query":"Which delegation workflow connects to both the delegation model and the Ollama concurrent limit?","expected_ids":["34f706d0-4e8"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-16","language":"fr","category":"old_critical_correction","query":"Retrouve l'ancienne correction critique LanceDB identifiée par 92395fa2-c63.","expected_ids":["92395fa2-c63"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-17","language":"en","category":"contradiction","query":"Which MobileAgent project records disagree between repo=~/github/mobileagent/ and repo=github/3l0935/mobileagent?","expected_ids":["62eac5ed-c62","87aedec6-dae"],"avoid_ids":[],"expect_abstain":false},
+    {"id":"final-18","language":"fr","category":"no_answer","query":"Quel est le mot de passe administrateur du NAS de sauvegarde ?","expected_ids":[],"avoid_ids":[],"expect_abstain":true},
+    {"id":"final-19","language":"en","category":"no_answer","query":"Which Terraform workspace deploys the lunar telemetry gateway?","expected_ids":[],"avoid_ids":[],"expect_abstain":true},
+    {"id":"final-20","language":"fr","category":"dependency","query":"Quelle mémoire centrale relie les projets actifs ModToolLauncher, T3-Code et Vigil ?","expected_ids":["1318ec0c-b77"],"avoid_ids":[],"expect_abstain":false}
+  ]
+}
