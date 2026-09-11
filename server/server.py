@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
@@ -26,6 +26,8 @@ STATIC_DIR = Path(__file__).parent / "static"
 LANCEDB_PATH = HERMES_HOME / "lancedb"
 HOST = "127.0.0.1"
 PORT = 7778
+MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 _CANONICAL_ID_RE = re.compile(
     r"(?:[0-9a-f]{8}-[0-9a-f]{3}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
@@ -78,6 +80,47 @@ def _invalid_import_id(data: dict) -> str | None:
             if conflict.get(name) and not _is_canonical_id(conflict[name]):
                 return f"conflicts[{index}].{name}"
     return None
+
+
+class RequestBodyError(ValueError):
+    def __init__(self, status: int, message: str):
+        self.status = status
+        super().__init__(message)
+
+
+def _parse_host_header(value: str) -> tuple[str, int] | None:
+    if not value or any(character in value for character in ("/", "@", ",")):
+        return None
+    try:
+        parsed = urlsplit(f"//{value}")
+        hostname = (parsed.hostname or "").lower()
+        port = parsed.port or 80
+    except ValueError:
+        return None
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return None
+    if hostname not in _LOCAL_HOSTS:
+        return None
+    return hostname, port
+
+
+def _origin_matches_host(origin: str, host: tuple[str, int]) -> bool:
+    try:
+        parsed = urlsplit(origin)
+        origin_host = (parsed.hostname or "").lower()
+        origin_port = parsed.port or (80 if parsed.scheme == "http" else 443)
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme == "http"
+        and parsed.path == ""
+        and not parsed.username
+        and not parsed.password
+        and not parsed.query
+        and not parsed.fragment
+        and origin_host in _LOCAL_HOSTS
+        and (origin_host, origin_port) == host
+    )
 
 
 def _parse_entities(val):
@@ -1386,47 +1429,47 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
+        host = _parse_host_header(self.headers.get("Host", ""))
+        origin = self.headers.get("Origin")
+        if host is None or (origin is not None and not _origin_matches_host(origin, host)):
+            self._send_json({"error": "Local same-origin request required"}, 403)
+            return
+        try:
+            data = self._read_json()
+        except RequestBodyError as error:
+            self._send_json({"error": str(error)}, error.status)
+            return
+
         # --- Legacy POST endpoints (kept exactly as before) ---
         if path == "/api/delete":
-            data = self._read_json()
             memory_id = data.get("memory_id", "")
             result = delete_memory(memory_id)
             self._send_json(result)
         elif path == "/api/update":
-            data = self._read_json()
             result = update_memory(data)
             self._send_json(result)
         elif path == "/api/update_entities":
-            data = self._read_json()
             result = update_memory_entities(data)
             self._send_json(result)
         elif path == "/api/import":
-            data = self._read_json()
             result = import_memories(data)
             self._send_json(result)
 
         elif conflict_id := _parse_conflict_resolution_path(path):
-            data = self._read_json()
             self._send_json(api_resolve_conflict(conflict_id, data))
 
         # --- New memviz POST endpoints ---
         elif path == "/api/memories/bulk-delete":
-            data = self._read_json()
             self._send_json(api_bulk_delete(data))
         elif path == "/api/memories/bulk-tag":
-            data = self._read_json()
             self._send_json(api_bulk_tag(data))
         elif path == "/api/memories/bulk-type":
-            data = self._read_json()
             self._send_json(api_bulk_type(data))
         elif path == "/api/tags/rename":
-            data = self._read_json()
             self._send_json(api_rename_tag(data))
         elif path == "/api/tags/delete":
-            data = self._read_json()
             self._send_json(api_delete_tag(data))
         elif path == "/api/tags/merge":
-            data = self._read_json()
             self._send_json(api_merge_tags(data))
         else:
             # Check /api/memories/:id or /api/memories/:id/access
@@ -1438,19 +1481,33 @@ class Handler(BaseHTTPRequestHandler):
                     self._send_json(api_access_memory(mem_id))
                 else:
                     # POST /api/memories/:id — update memory
-                    data = self._read_json()
                     self._send_json(api_update_memory(mem_id, data))
             else:
                 self._send_json({"error": "Not found"}, 404)
 
     def _read_json(self) -> dict:
-        """Read and parse JSON body from request."""
-        content_len = int(self.headers.get("Content-Length", 0))
+        """Read one bounded application/json object from the request."""
+        if self.headers.get_content_type() != "application/json":
+            raise RequestBodyError(415, "Content-Type must be application/json")
+        raw_content_len = self.headers.get("Content-Length")
+        if raw_content_len is None:
+            raise RequestBodyError(411, "Content-Length is required")
+        try:
+            content_len = int(raw_content_len)
+        except (TypeError, ValueError):
+            raise RequestBodyError(400, "Invalid Content-Length") from None
+        if content_len <= 0:
+            raise RequestBodyError(400, "JSON body must not be empty")
+        if content_len > MAX_JSON_BODY_BYTES:
+            raise RequestBodyError(413, "JSON body exceeds 2 MiB limit")
         body = self.rfile.read(content_len)
         try:
-            return json.loads(body) if body else {}
-        except (json.JSONDecodeError, TypeError):
-            return {}
+            data = json.loads(body)
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
+            raise RequestBodyError(400, "Malformed JSON body") from None
+        if not isinstance(data, dict):
+            raise RequestBodyError(400, "JSON body must be an object")
+        return data
 
     def _send_json(self, data: dict, status: int = 200, download: str = None):
         body = json.dumps(data, indent=2, default=str).encode("utf-8")
@@ -1461,11 +1518,19 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(body)
 
     def _serve_file(self, filepath: Path, mime: str | None = None):
+        try:
+            static_root = STATIC_DIR.resolve()
+            filepath = filepath.resolve()
+            filepath.relative_to(static_root)
+        except (OSError, RuntimeError, ValueError):
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not found")
+            return
         if not filepath.exists() or not filepath.is_file():
             self.send_response(404)
             self.end_headers()

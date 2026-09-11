@@ -22,7 +22,7 @@ echo "Starting ${NAME} on port ${PORT}..."
 docker run -d \
   --name "${NAME}" \
   --restart unless-stopped \
-  -p "${PORT}:7777" \
+  -p "127.0.0.1:${PORT}:7777" \
   -e OLLAMA_HOST="${OLLAMA_HOST:-http://host.docker.internal:11434}" \
   -e HERMES_HOME=/home/hermes/.hermes \
   -v "${HOME}/.hermes/lancedb:/home/hermes/.hermes/lancedb:rw" \
