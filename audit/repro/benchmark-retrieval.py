@@ -238,6 +238,74 @@ def evaluate_variant(store, questions: list[dict[str, Any]], variant: str) -> di
     return {"metrics": compute_metrics(questions, observations), "observations": observations}
 
 
+def promotion_decision(results: dict[str, Any], final_dataset: dict[str, Any]) -> dict[str, Any]:
+    """Apply the frozen, auditable gate to final-split metrics only."""
+    variants = results["splits"]["final"]
+    current = variants["current_hybrid"]
+    corrected = variants["corrected_hybrid"]
+    one_hop = variants["corrected_one_hop"]
+
+    critical_ids = {
+        question["id"]: set(question["expected_ids"])
+        for question in final_dataset["questions"]
+        if question["category"] == "old_critical_correction"
+    }
+
+    def critical_hits(variant: dict[str, Any]) -> dict[str, bool]:
+        observations = {
+            row["question_id"]: set(row["result_ids"][:5])
+            for row in variant["observations"]
+        }
+        return {
+            question_id: bool(expected.intersection(observations.get(question_id, set())))
+            for question_id, expected in critical_ids.items()
+        }
+
+    current_critical = critical_hits(current)
+    corrected_critical = critical_hits(corrected)
+    no_critical_regression = all(
+        not was_found or corrected_critical.get(question_id, False)
+        for question_id, was_found in current_critical.items()
+    )
+    cm = current["metrics"]
+    hm = corrected["metrics"]
+    om = one_hop["metrics"]
+    recall_delta = hm["recall_at_5"] - cm["recall_at_5"]
+    hybrid_promoted = bool(
+        hm["no_answer_false_result_rate"] < cm["no_answer_false_result_rate"]
+        and hm["mrr"] >= cm["mrr"]
+        and recall_delta >= -0.05
+        and no_critical_regression
+    )
+    one_hop_promoted = bool(
+        om["no_answer_false_result_rate"] <= hm["no_answer_false_result_rate"]
+        and (
+            om["recall_at_5"] > hm["recall_at_5"]
+            or om["mrr"] > hm["mrr"]
+        )
+    )
+    return {
+        "basis": "frozen final split only",
+        "corrected_hybrid": {
+            "promoted": hybrid_promoted,
+            "recall_at_5_delta": round(recall_delta, 6),
+            "mrr_delta": round(hm["mrr"] - cm["mrr"], 6),
+            "no_answer_false_result_rate_delta": round(
+                hm["no_answer_false_result_rate"] - cm["no_answer_false_result_rate"], 6
+            ),
+            "critical_no_regression": no_critical_regression,
+            "decision": "keep corrected routing" if hybrid_promoted else "revert corrected routing",
+        },
+        "corrected_one_hop_as_default": {
+            "promoted": one_hop_promoted,
+            "decision": (
+                "promote as default" if one_hop_promoted
+                else "retain bounded typed route without expanding default routing"
+            ),
+        },
+    }
+
+
 def run_benchmark(fixture_path: Path, datasets: list[dict[str, Any]]) -> dict[str, Any]:
     if not _is_tmp_path(fixture_path):
         raise ValueError("benchmark fixture must be below /tmp")
@@ -265,6 +333,8 @@ def run_benchmark(fixture_path: Path, datasets: list[dict[str, Any]]) -> dict[st
             variant: evaluate_variant(store, dataset["questions"], variant)
             for variant in VARIANTS
         }
+    final_dataset = next(dataset for dataset in datasets if dataset["split"] == "final")
+    output["promotion_decision"] = promotion_decision(output, final_dataset)
     return output
 
 

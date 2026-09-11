@@ -136,10 +136,10 @@
 
 ## Task C3: Benchmark and promotion gate
 
-- [ ] Run lexical, current hybrid, corrected hybrid, and corrected one-hop under the one-thread protocol.
-- [ ] Write `audit/repro/retrieval-benchmark-results.json` with per-split metrics and environment metadata.
-- [ ] Promote route changes only if the frozen final metrics support them; otherwise revert routing behavior while retaining the report/harness.
-- [ ] Commit promoted code and tests, then rerun the full suite.
+- [x] Run lexical, current hybrid, corrected hybrid, and corrected one-hop under the one-thread protocol.
+- [x] Write `audit/repro/retrieval-benchmark-results.json` with per-split metrics and environment metadata.
+- [x] Promote route changes only if the frozen final metrics support them; otherwise revert routing behavior while retaining the report/harness.
+- [x] Commit promoted code and tests, then rerun the full suite.
 
 ## Task D: Add bounded vanilla-JS visualization features
 

@@ -119,6 +119,32 @@ class RetrievalBenchmarkTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 benchmark.copy_read_only_fixture(source_path, ROOT / "forbidden-fixture")
 
+    def test_promotion_gate_requires_false_result_gain_and_no_critical_regression(self):
+        benchmark = load_benchmark_module()
+        dataset = {"questions": [{
+            "id": "critical", "category": "old_critical_correction",
+            "expected_ids": ["critical-id"],
+        }]}
+        results = {"splits": {"final": {
+            "current_hybrid": {
+                "metrics": {"recall_at_5": 0.88, "mrr": 0.74, "no_answer_false_result_rate": 1.0},
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+            "corrected_hybrid": {
+                "metrics": {"recall_at_5": 0.85, "mrr": 0.75, "no_answer_false_result_rate": 0.0},
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+            "corrected_one_hop": {
+                "metrics": {"recall_at_5": 0.85, "mrr": 0.75, "no_answer_false_result_rate": 0.0},
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+        }}}
+
+        decision = benchmark.promotion_decision(results, dataset)
+
+        self.assertTrue(decision["corrected_hybrid"]["promoted"])
+        self.assertFalse(decision["corrected_one_hop_as_default"]["promoted"])
+
 
 if __name__ == "__main__":
     unittest.main()
