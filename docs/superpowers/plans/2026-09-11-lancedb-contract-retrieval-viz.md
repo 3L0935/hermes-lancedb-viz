@@ -28,7 +28,7 @@
 - [x] Run baseline with `PYTHONPATH=/home/elo/github/hermes-lancedb-viz:/home/elo/.hermes/hermes-agent /home/elo/.hermes/hermes-agent/venv/bin/python -m pytest -q tests`; expect `120 passed`.
 - [x] Read the required architecture, hardening plan, and reproduction artifacts in order.
 - [x] Measure density by direct projected Arrow read with `OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1`; verify the live table version is unchanged.
-- [ ] Keep reproducible measurements and decisions under ignored `audit/repro/`; never instantiate `LanceDBStore` against the live path.
+- [x] Keep reproducible measurements and decisions under ignored `audit/repro/`; never instantiate `LanceDBStore` against the live path.
 
 ## Task A1: Freeze and test contract v2
 
@@ -38,11 +38,11 @@
 - Modify: `plugin/memory_contract.py`
 - Modify: `tests/test_memory_contract.py`
 
-- [ ] Add fixture assertions for the six baseline counts and representative valid/invalid inputs.
-- [ ] Add a red test proving `/tmp/Alpha` and `/tmp/alpha` have different fingerprints while normalized claim keys remain equivalent.
-- [ ] Preserve claim values in `memory_fingerprint`; normalize only wrappers, claim keys, whitespace, and relation ordering.
-- [ ] Record the 2026-09-11 read-only density distribution and retain the evidence-backed 1,000-character per-fact / 2,000-character aggregate caps; accept both prose and `key=value`.
-- [ ] Run `python -m pytest -q tests/test_memory_contract.py` and the full suite, then commit `fix: freeze case-safe memory contract`.
+- [x] Add fixture assertions for the six baseline counts and representative valid/invalid inputs.
+- [x] Add a red test proving `/tmp/Alpha` and `/tmp/alpha` have different fingerprints while normalized claim keys remain equivalent.
+- [x] Preserve claim values in `memory_fingerprint`; normalize only wrappers, claim keys, whitespace, and relation ordering.
+- [x] Record the 2026-09-11 read-only density distribution and retain the evidence-backed 1,000-character per-fact / 2,000-character aggregate caps; accept both prose and `key=value`.
+- [x] Run `python -m pytest -q tests/test_memory_contract.py` and the full suite, then commit `fix: freeze case-safe memory contract`.
 
 ## Task A2: Enforce the single write gate
 
@@ -54,10 +54,10 @@
 - Modify: `tests/test_provider_formatting.py`
 - Modify: `tests/test_viz_retention.py`
 
-- [ ] Enumerate every mutation call site and add a red bypass test for any supported raw path.
-- [ ] Validate exact fingerprint, subject conflicts, relation targets, and write mode before embedding.
-- [ ] Make tool schemas closed and fully structured; responses include normalized fields, canonical content, warnings, conflicts, idempotency status, and replaced content for upsert/update.
-- [ ] Run focused tests and the full suite, then commit only if behavior changes are required.
+- [x] Enumerate every mutation call site and add a red bypass test for any supported raw path.
+- [x] Validate exact fingerprint, subject conflicts, relation targets, and write mode before embedding.
+- [x] Make tool schemas closed and fully structured; responses include normalized fields, canonical content, warnings, conflicts, idempotency status, and replaced content for upsert/update.
+- [x] Run focused tests and the full suite, then commit only if behavior changes are required.
 
 ## Task A3: Align audit, cron, and migration
 
@@ -67,10 +67,10 @@
 - Modify: `tests/test_audit_memory_format.py`
 - Modify: `tests/test_migrate_memory_format.py`
 
-- [ ] Add a red CLI test proving `--apply` is unavailable and no mutation helper is reachable.
-- [ ] Remove apply/backup/write code; output only `auto_fix` versus `manual_review` classifications from a projected read.
-- [ ] Verify scripts contain no formatting policy beyond calls into `memory_contract.py`.
-- [ ] Run focused tests and the full suite, then commit `fix: make memory format migration dry-run only`.
+- [x] Add a red CLI test proving `--apply` is unavailable and no mutation helper is reachable.
+- [x] Remove apply/backup/write code; output only `auto_fix` versus `manual_review` classifications from a projected read.
+- [x] Verify scripts contain no formatting policy beyond calls into `memory_contract.py`.
+- [x] Run focused tests and the full suite, then commit `fix: make memory format migration dry-run only`.
 
 ## Task B1: Render database text safely
 
@@ -79,9 +79,9 @@
 - Modify: `static/graph.js`
 - Modify: `tests/test_viz_retention.py`
 
-- [ ] Add a red static regression covering every database-originated field used by `innerHTML` or `insertAdjacentHTML`.
-- [ ] Replace those sinks with DOM construction and `textContent`, or centralized escaping when markup structure is static.
-- [ ] Run the focused test, `node --check static/app.js`, `node --check static/graph.js`, and the full suite; commit `fix: render memory fields as untrusted text`.
+- [x] Add a red static regression covering every database-originated field used by `innerHTML` or `insertAdjacentHTML`.
+- [x] Replace those sinks with DOM construction and `textContent`, or centralized escaping when markup structure is static.
+- [x] Run the focused test, `node --check static/app.js`, `node --check static/graph.js`, and the full suite; commit `fix: render memory fields as untrusted text`.
 
 ## Task B2: Serialize local mutations and unify quality
 
@@ -90,11 +90,11 @@
 - Modify: `tests/test_store_retention.py`
 - Modify: `README.md`
 
-- [ ] Add a deterministic red interleaving test using two stores in one process.
-- [ ] Hold one process-local lock keyed by resolved database path around mutation preflight and commit.
-- [ ] Document that `_fresh()` prevents stale snapshots but does not provide inter-process atomicity.
-- [ ] Add a red stale-quality reproduction; select one read-time computation path and ensure every recalculating view uses it without contradictory persisted values.
-- [ ] Run focused and full tests; commit `fix: serialize local writes and unify quality reads`.
+- [x] Add a deterministic red interleaving test using two stores in one process.
+- [x] Hold one process-local lock keyed by resolved database path around mutation preflight and commit.
+- [x] Document that `_fresh()` prevents stale snapshots but does not provide inter-process atomicity.
+- [x] Add a red stale-quality reproduction; select one read-time computation path and ensure every recalculating view uses it without contradictory persisted values.
+- [x] Run focused and full tests; commit `fix: serialize local writes and unify quality reads`.
 
 ## Task B3: Repair maintenance docs and dry-run
 
@@ -105,10 +105,10 @@
 - Modify: `CONTRIBUTING.md`
 - Create or modify: focused script/documentation tests under `tests/`
 
-- [ ] Replace stale raw-write/update examples with structured policy and tool-choice examples.
-- [ ] Add a red subprocess test for `reembed-entries.py --dry-run` with Ollama unavailable; fix imports and order so it exits before any model connection.
-- [ ] Document the exact clean-checkout `PYTHONPATH` and pytest invocation.
-- [ ] Run focused and full tests; commit docs and script fixes as separate coherent units.
+- [x] Replace stale raw-write/update examples with structured policy and tool-choice examples.
+- [x] Add a red subprocess test for `reembed-entries.py --dry-run` with Ollama unavailable; fix imports and order so it exits before any model connection.
+- [x] Document the exact clean-checkout `PYTHONPATH` and pytest invocation.
+- [x] Run focused and full tests; commit docs and script fixes as separate coherent units.
 
 ## Task C1: Build the frozen retrieval evaluation
 
@@ -151,13 +151,13 @@
 - Modify: `static/style.css`
 - Modify: server/viz tests
 
-- [ ] Add a structured editor with canonical preview, old/new diff, relation fields, and visible version conflict.
-- [ ] Add an on-demand review inbox fed by projected audit output; explain format, contradiction, broken-reference, and near-duplicate reasons without treating age as falsity.
-- [ ] Replace the global graph default with a selected-memory neighborhood, typed/proximity edge distinction, hidden-neighbor count, and paused off-screen physics.
-- [ ] Add on-demand health/cost diagnostics with versions, fragments, FTS lag, useful/history bytes, Ollama errors, pipeline identity, and pre-maintenance estimates.
-- [ ] Connect the “Why this result?” panel to C diagnostics.
-- [ ] State and enforce response/node/edge/history budgets in code and tests.
-- [ ] Run browser-independent tests, both Node syntax checks, and the full suite; commit each independent feature.
+- [x] Add a structured editor with canonical preview, old/new diff, relation fields, and visible version conflict.
+- [x] Add an on-demand review inbox fed by projected audit output; explain format, contradiction, broken-reference, and near-duplicate reasons without treating age as falsity.
+- [x] Replace the global graph default with a selected-memory neighborhood, typed/proximity edge distinction, hidden-neighbor count, and paused off-screen physics.
+- [x] Add on-demand health/cost diagnostics with versions, fragments, FTS lag, useful/history bytes, Ollama errors, pipeline identity, and pre-maintenance estimates.
+- [x] Connect the “Why this result?” panel to C diagnostics.
+- [x] State and enforce response/node/edge/history budgets in code and tests.
+- [x] Run browser-independent tests, both Node syntax checks, and the full suite; commit each independent feature.
 
 ## Final verification
 
