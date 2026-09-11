@@ -74,6 +74,40 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertTrue(all("vector" not in columns for columns in selected_columns))
         self.assertTrue(all("content" in columns for columns in selected_columns))
 
+    def test_reopen_reuses_current_fts_index_without_version_commit(self):
+        self.add("Project:Alpha state=active [Tier=2]")
+        self.store._ensure_fts_index(self.store._table)
+        indexed_version = self.store._table.version
+        index = next(
+            item for item in self.store._table.list_indices()
+            if item.index_type == "FTS" and item.columns == ["content"]
+        )
+        self.assertEqual(self.store.count(), index.num_indexed_rows)
+        self.assertEqual(0, index.num_unindexed_rows)
+
+        reopened = LanceDBStore(Path(self.tmp.name))
+
+        self.assertEqual(indexed_version, reopened._table.version)
+
+    def test_reopen_rebuilds_fts_index_when_rows_are_unindexed(self):
+        self.add("Project:Alpha state=active [Tier=2]")
+        stale_version = self.store._table.version
+        stale_index = next(
+            item for item in self.store._table.list_indices()
+            if item.index_type == "FTS" and item.columns == ["content"]
+        )
+        self.assertGreater(stale_index.num_unindexed_rows, 0)
+
+        reopened = LanceDBStore(Path(self.tmp.name))
+        rebuilt_index = next(
+            item for item in reopened._table.list_indices()
+            if item.index_type == "FTS" and item.columns == ["content"]
+        )
+
+        self.assertGreater(reopened._table.version, stale_version)
+        self.assertEqual(reopened.count(), rebuilt_index.num_indexed_rows)
+        self.assertEqual(0, rebuilt_index.num_unindexed_rows)
+
     def test_direct_raw_add_is_fenced_from_cron_style_bypass(self):
         with self.assertRaises(MemoryContractError) as caught:
             self.store.add("garbage copied from cron")

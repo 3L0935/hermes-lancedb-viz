@@ -451,9 +451,18 @@ class LanceDBStore:
             return tbl
 
     def _ensure_fts_index(self, tbl):
-        """Create FTS (BM25) index on content column for hybrid search.
-        Idempotent via replace=True — safe to call on every init."""
+        """Create or refresh the content FTS index only when rows are missing."""
         try:
+            row_count = tbl.count_rows()
+            for index in tbl.list_indices():
+                if (
+                    str(index.index_type).upper() == "FTS"
+                    and list(index.columns) == ["content"]
+                    and index.num_indexed_rows == row_count
+                    and index.num_unindexed_rows == 0
+                ):
+                    logger.info("FTS index already current on content column")
+                    return
             try:
                 from lancedb.index import FTS
                 tbl.create_index("content", config=FTS(), replace=True)
