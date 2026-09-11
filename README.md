@@ -230,6 +230,18 @@ Dynamic score (0-1) computed at each access:
 | **Decay curve** | **0.985^days since last access** (~50% after 46d, ~25% after 93d) |
 
 Stale memories drop toward 0.1 but never hit 0. Re-accessing a memory resets the decay clock.
+The stale view recomputes this score through the same `_compute_quality()`
+function as detail access and exposes the previous stored value as
+`persisted_quality`; the read-only maintenance view does not write it back.
+
+### Mutation concurrency
+
+All public store mutations share a process-local re-entrant lock keyed by the
+resolved database path. The lock covers structured preflight and commit, so two
+store instances in one process cannot both create the same canonical memory.
+`_fresh()` keeps MVCC handles current, but neither mechanism provides atomicity
+between separate processes. Cross-process writers must be externally
+serialized; this limitation is explicit rather than inferred from MVCC.
 
 ### Auto-tagging
 

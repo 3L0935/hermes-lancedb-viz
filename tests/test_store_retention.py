@@ -1,4 +1,5 @@
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -155,6 +156,50 @@ class StoreRetentionTests(unittest.TestCase):
         self.assertEqual(1, len(calls))
         self.assertEqual(1, self.store.count())
 
+    def test_two_stores_serialize_preflight_and_commit_in_one_process(self):
+        second_store = LanceDBStore(Path(self.tmp.name))
+        first_checked = threading.Event()
+        release_first = threading.Event()
+        second_finished = threading.Event()
+        results = []
+        errors = []
+        original_preflight = self.store._preflight_memory_write
+
+        def paused_preflight(memory, *, exclude_id=""):
+            result = original_preflight(memory, exclude_id=exclude_id)
+            first_checked.set()
+            if not release_first.wait(2):
+                raise TimeoutError("test did not release first writer")
+            return result
+
+        self.store._preflight_memory_write = paused_preflight
+
+        def write(store, finished=None):
+            try:
+                results.append(store.add_memory(self.structured()))
+            except Exception as error:
+                errors.append(error)
+            finally:
+                if finished:
+                    finished.set()
+
+        first = threading.Thread(target=write, args=(self.store,))
+        second = threading.Thread(target=write, args=(second_store, second_finished))
+        first.start()
+        self.assertTrue(first_checked.wait(2))
+        second.start()
+        second_finished.wait(0.2)
+        release_first.set()
+        first.join(2)
+        second.join(2)
+
+        self.assertEqual([], errors)
+        self.assertEqual(["created", "idempotent"], sorted(
+            (result["status"] for result in results),
+            key=lambda status: status != "created",
+        ))
+        self.assertEqual(1, self.store.count())
+
     def test_same_subject_new_details_suggest_update_before_embedding(self):
         calls = []
         self.store._embed = lambda content: calls.append(content) or fake_embed(self.store, content)
@@ -287,6 +332,20 @@ class StoreRetentionTests(unittest.TestCase):
             original_vector,
             np.array(self.store._get_by_id_raw(memory_id)["vector"]),
         )
+
+    def test_stale_filter_uses_same_recalculated_quality_as_detail_reads(self):
+        memory_id = self.store.add_memory(self.structured())["memory_id"]
+        old = 1_600_000_000.0
+        self.store._table.update(
+            f"id = '{memory_id}'",
+            {"created_at": old, "accessed_at": old, "quality": 0.5},
+        )
+
+        stale = self.store.get_stale(days=90, quality_max=0.3)
+
+        self.assertEqual([memory_id], [memory["id"] for memory in stale])
+        self.assertLessEqual(stale[0]["quality"], 0.3)
+        self.assertEqual(0.5, stale[0]["persisted_quality"])
 
     def test_content_update_preserves_relations_when_patch_omits_them(self):
         target_id = self.add("Project:Target state=active [Tier=2]")

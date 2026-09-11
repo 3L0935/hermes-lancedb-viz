@@ -7,9 +7,11 @@ Embeddings via Ollama (nomic-embed-text), local only.
 from __future__ import annotations
 
 import json
+from functools import wraps
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -29,6 +31,24 @@ from .memory_contract import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MUTATION_LOCKS: dict[str, threading.RLock] = {}
+_MUTATION_LOCKS_GUARD = threading.Lock()
+
+
+def _mutation_lock_for(db_path: Path) -> threading.RLock:
+    key = str(db_path.expanduser().resolve())
+    with _MUTATION_LOCKS_GUARD:
+        return _MUTATION_LOCKS.setdefault(key, threading.RLock())
+
+
+def _serialized_mutation(method):
+    """Serialize one process's mutations for a resolved LanceDB path."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._mutation_lock:
+            return method(self, *args, **kwargs)
+    return wrapped
 
 
 class MemoryEmbeddingError(RuntimeError):
@@ -401,6 +421,7 @@ class LanceDBStore:
         import lancedb
         self._path = Path(db_path)
         self._path.mkdir(parents=True, exist_ok=True)
+        self._mutation_lock = _mutation_lock_for(self._path)
         self._db = lancedb.connect(str(self._path))
         self._table_name = "memories"
         self._table: "lancedb.table.LanceTable" = self._init_table()
@@ -844,6 +865,7 @@ class LanceDBStore:
             key=lambda row: (float(row.get("created_at") or 0.0), str(row.get("id") or "")),
         )
 
+    @_serialized_mutation
     def import_conflict_records(self, records: list[dict]) -> int:
         """Restore exported conflict audit rows using their logical unique key."""
         from uuid import uuid4
@@ -899,6 +921,7 @@ class LanceDBStore:
         self._archive_resolved_conflicts(table)
         return len(normalized)
 
+    @_serialized_mutation
     def detect_conflicts_for(self, memory_id: str) -> list[dict]:
         """Record explicit same-subject key=value contradictions, without mutation."""
         from uuid import uuid4
@@ -1066,6 +1089,7 @@ class LanceDBStore:
             logger.warning("Failed to close conflicts for %s: %s", memory_id, error)
             return False
 
+    @_serialized_mutation
     def resolve_conflict(self, conflict_id: str, resolution_note: str,
                          resolved_by: str = "user") -> bool:
         """Resolve an open conflict while preserving an explicit audit trail."""
@@ -1360,6 +1384,7 @@ class LanceDBStore:
 
         return mem_id
 
+    @_serialized_mutation
     def add_memory(
         self,
         memory: MemoryWrite,
@@ -1461,6 +1486,7 @@ class LanceDBStore:
             "warnings": warning_dicts,
         }
 
+    @_serialized_mutation
     def add(
         self,
         content: str,
@@ -1582,6 +1608,7 @@ class LanceDBStore:
             logger.error("Update failed: %s", e)
             return False
 
+    @_serialized_mutation
     def update_memory(
         self,
         patch: MemoryPatch,
@@ -1729,6 +1756,7 @@ class LanceDBStore:
             "warnings": warning_dicts,
         }
 
+    @_serialized_mutation
     def update(self, memory_id: str, *, legacy: bool = False, **kwargs) -> bool:
         """Legacy import/migration adapter; normal callers use update_memory."""
         memory_id = _require_memory_id(memory_id)
@@ -1765,6 +1793,7 @@ class LanceDBStore:
             )
         return self._apply_update(memory_id, **kwargs)
 
+    @_serialized_mutation
     def delete(self, memory_id: str) -> bool:
         """Delete a memory by ID."""
         memory_id = _require_memory_id(memory_id)
@@ -1797,6 +1826,7 @@ class LanceDBStore:
             logger.error("Delete failed: %s", e)
             return False
 
+    @_serialized_mutation
     def import_records(self, items: list[dict],
                        conflict_records: list[dict] | None = None,
                        edge_records: list[dict] | None = None) -> dict:
@@ -1936,6 +1966,7 @@ class LanceDBStore:
             "errors": errors,
         }
 
+    @_serialized_mutation
     def bulk_delete(self, memory_ids: list[str]) -> dict:
         """Delete multiple memories. Returns {deleted: N, errors: [...]}."""
         memory_ids = [_require_memory_id(mid) for mid in memory_ids]
@@ -1987,6 +2018,7 @@ class LanceDBStore:
         quality = (quality * decay_factor) + (0.5 * (1.0 - decay_factor) * 0.1)
         return max(0.1, min(1.0, round(quality, 2)))
 
+    @_serialized_mutation
     def get_by_id(self, memory_id: str) -> dict | None:
         """Get a memory by ID (vector removed)."""
         memory_id = _require_memory_id(memory_id)
@@ -2303,6 +2335,7 @@ class LanceDBStore:
                 tag_counts[tag] = tag_counts.get(tag, 0) + 1
         return dict(sorted(tag_counts.items(), key=lambda x: -x[1]))
 
+    @_serialized_mutation
     def update_tags(self, memory_id: str, tags: list[str]) -> bool:
         """Replace tags for a memory."""
         memory_id = _require_memory_id(memory_id)
@@ -2318,6 +2351,7 @@ class LanceDBStore:
         except Exception:
             return False
 
+    @_serialized_mutation
     def bulk_tag(self, memory_ids: list[str], add_tags: list[str] | None = None,
                  remove_tags: list[str] | None = None) -> dict:
         """Add/remove tags from multiple memories."""
@@ -2349,6 +2383,7 @@ class LanceDBStore:
                 logger.error("Bulk tag failed for %s: %s", mid, e)
         return results
 
+    @_serialized_mutation
     def rename_tag(self, old_name: str, new_name: str) -> int:
         """Rename a tag across all memories. Returns number of memories updated."""
         memories = self.get_all()
@@ -2371,6 +2406,7 @@ class LanceDBStore:
                 updated += 1
         return updated
 
+    @_serialized_mutation
     def delete_tag(self, tag: str) -> int:
         """Remove a tag from all memories. Returns number of memories updated."""
         memories = self.get_all()
@@ -2393,6 +2429,7 @@ class LanceDBStore:
                 updated += 1
         return updated
 
+    @_serialized_mutation
     def merge_tags(self, sources: list[str], target: str) -> int:
         """Merge multiple tags into one. Returns number of memories updated."""
         memories = self.get_all()
@@ -2545,9 +2582,13 @@ class LanceDBStore:
         stale = []
         for m in memories:
             created = m.get("created_at", now)
-            quality = m.get("quality", 0.5)
+            persisted_quality = m.get("quality", 0.5)
+            quality = self._compute_quality(m)
             if created < cutoff and quality <= quality_max:
-                stale.append(m)
+                item = dict(m)
+                item["persisted_quality"] = persisted_quality
+                item["quality"] = quality
+                stale.append(item)
         stale.sort(key=lambda m: m.get("created_at", 0))
         return stale
 
@@ -2754,6 +2795,7 @@ class LanceDBStore:
                 f"id = {_sql_literal(mid)}", {"links": json.dumps(linked)}
             )
 
+    @_serialized_mutation
     def update_entities(self, memory_id: str, entities: list[str]) -> bool:
         """Update entities/tags for a memory. Rebuilds links."""
         memory_id = _require_memory_id(memory_id)
