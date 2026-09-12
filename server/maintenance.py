@@ -40,27 +40,49 @@ def _value(item: Any, key: str) -> Any:
 
 
 def _active_index_uuids(table: Any) -> set[str] | None:
-    """Return index UUIDs referenced by current Lance metadata, or None."""
+    """Return index UUIDs referenced by current Lance metadata, or None.
+
+    ``table.list_indices()`` is tried first because it is the only path that
+    works without ``pylance``: the production container has no ``lance``
+    module, so ``to_lance()`` raises there and every caller of this helper
+    would silently get ``None`` (no orphan detection, no bounded trigger).
+    Measured on a real database: both paths return the same active set.
+    """
+    indices = None
     try:
-        dataset = table.to_lance()
-        if hasattr(dataset, "describe_indices"):
-            descriptions = list(dataset.describe_indices())
-            segment_lists = [_value(description, "segments") for description in descriptions]
-            if descriptions and any(segments is None for segments in segment_lists):
-                indices = dataset.list_indices()
-            else:
-                indices = [
-                    segment
-                    for segments in segment_lists
-                    for segment in (segments or [])
-                ]
-        else:
-            indices = dataset.list_indices()
+        indices = list(table.list_indices())
     except Exception:
-        return None
+        indices = None
+    if indices is None:
+        try:
+            dataset = table.to_lance()
+            if hasattr(dataset, "describe_indices"):
+                descriptions = list(dataset.describe_indices())
+                segment_lists = [
+                    _value(description, "segments") for description in descriptions
+                ]
+                if descriptions and any(segments is None for segments in segment_lists):
+                    indices = dataset.list_indices()
+                else:
+                    indices = [
+                        segment
+                        for segments in segment_lists
+                        for segment in (segments or [])
+                    ]
+            else:
+                indices = dataset.list_indices()
+        except Exception:
+            return None
+    return _uuid_set(indices)
+
+
+def _uuid_set(indices: Any) -> set[str] | None:
+    """Collect normalized UUIDs from index descriptors, or None when unreadable."""
     active = set()
     for index in indices:
         value = _value(index, "uuid")
+        if value is None:
+            value = _value(index, "index_uuid")
         if value is None:
             return None
         try:

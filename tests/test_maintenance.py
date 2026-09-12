@@ -72,6 +72,34 @@ class MaintenanceTests(unittest.TestCase):
 
         self.assertEqual({active}, _active_index_uuids(table))
 
+    def test_active_index_uuid_helper_works_without_pylance(self):
+        """The container has no lance module: to_lance() must not be the only path.
+
+        Production symptom: to_lance() raises ImportError there, every caller got
+        None, and both orphan cleanup and the bounded trigger silently never ran
+        (orphan_index_directories=null on a database with 133 orphan directories).
+        """
+        active = str(uuid4())
+
+        class Table:
+            def list_indices(self):
+                return [SimpleNamespace(index_uuid=active, index_type="FTS")]
+
+            def to_lance(self):
+                raise ImportError("The lance library is required to use this function")
+
+        self.assertEqual({active}, _active_index_uuids(Table()))
+
+    def test_active_index_uuid_helper_refuses_to_guess_when_uuid_is_unreadable(self):
+        class Table:
+            def list_indices(self):
+                return [SimpleNamespace(index_type="FTS")]
+
+            def to_lance(self):
+                raise ImportError("no lance")
+
+        self.assertIsNone(_active_index_uuids(Table()))
+
     def test_compaction_creates_atomic_backup_purges_only_old_compaction_backups_and_verifies(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
