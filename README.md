@@ -13,9 +13,9 @@ A complete memory system for Hermes Agent that persists across sessions:
   auto-tagging, quality decay, target-ID relations, local query routing, one-hop
   graph recall, and deterministic contradiction detection.
 - **Visualizer** (`server/` + `static/`) - lightweight web UI, normally run in
-  Docker on port 7777, with an optional systemd fallback on port 7778. 10 pages:
-  Dashboard, Memories, Timeline,
-  Tags, Duplicates, Conflicts, Embeddings, Clusters, Stale, and Graph.
+  Docker on port 7777, with an optional systemd fallback on port 7778. 11 pages:
+  Dashboard, Memories, Timeline, Tags, Duplicates, Conflicts, Review, Embeddings,
+  Clusters, Stale, and Graph. [See the screenshots](#visualizer).
 - **Scripts** (`scripts/`) - relation migration, contradiction backfill,
   re-embedding, duplicate consolidation, and verification.
 - **Docs** (`docs/`) - Setup guide and memory writing reference.
@@ -288,53 +288,66 @@ routed locally without an LLM call.
 
 ## Visualizer
 
-Lightweight web UI with 11 pages. Screenshots below are of a synthetic fixture
-(`docs/screenshots/`, 15 invented memories), never of a real database.
+A lightweight web UI with 11 pages, served on `127.0.0.1:7777`.
+
+> The screenshots below come from `docs/screenshots/`, captured against a **synthetic
+> fixture** of 18 invented memories. No screenshot contains data from a real database.
 
 ### Dashboard
+
+Counters, category and tier breakdown, tags, most-accessed memories.
+
 ![Dashboard](docs/screenshots/01-dashboard.png)
 
 ### Graph
-The graph opens on the **whole corpus**, drawing embedding-similarity edges only.
 
-![Graph, whole corpus](docs/screenshots/10-graph-full.png)
+The graph opens on the **whole corpus** and draws embedding-similarity edges only.
+Clicking a memory does not reload it: the sidebar opens over the graph and the node and
+its neighbours glow. `Escape`, the close button, or a click on empty canvas clears it.
 
-Selecting a memory does not reload the graph: the sidebar opens over it and the node and
-its neighbours glow. Escape, the close button or a click on empty canvas clears it.
+| Whole corpus | Memory selected |
+|---|---|
+| ![Graph, whole corpus](docs/screenshots/11-graph-full.png) | ![Graph with a memory selected](docs/screenshots/12-graph-selected.png) |
 
-![Graph with a memory selected](docs/screenshots/11-graph-selected.png)
+Grouping is switchable at any time: category hubs, entity hubs, or the raw embedding view.
 
-Grouping is switchable: by category hubs, by entity hubs, or the raw embedding view.
-
-![Graph grouped by category hubs](docs/screenshots/12-graph-hubs.png)
+![Graph grouped by category hubs](docs/screenshots/13-graph-hubs.png)
 
 ### Embeddings
-UMAP projection of every memory vector, plus a read-only local health inspection.
 
-![Embeddings and local health](docs/screenshots/07-embedding-health.png)
+UMAP projection of every memory vector, next to a read-only local health inspection.
 
-### Other pages
+![Embeddings and local health](docs/screenshots/08-embedding-health.png)
+
+### Browse and review
+
 | Memories | Timeline | Tags |
 |---|---|---|
 | ![Memories](docs/screenshots/02-memories.png) | ![Timeline](docs/screenshots/03-timeline.png) | ![Tags](docs/screenshots/04-tags.png) |
 
-| Conflicts | Review | Clusters | Stale |
-|---|---|---|---|
-| ![Conflicts](docs/screenshots/05-conflicts.png) | ![Review](docs/screenshots/06-review.png) | ![Clusters](docs/screenshots/08-clusters.png) | ![Stale](docs/screenshots/09-stale.png) |
+| Duplicates | Conflicts |
+|---|---|
+| ![Duplicates](docs/screenshots/05-duplicates.png) | ![Conflicts](docs/screenshots/06-conflicts.png) |
 
-Page list:
+| Review | Clusters | Stale |
+|---|---|---|
+| ![Review](docs/screenshots/07-review.png) | ![Clusters](docs/screenshots/09-clusters.png) | ![Stale](docs/screenshots/10-stale.png) |
 
-- **Dashboard** — total memories, category breakdown, tier distribution, top accessed
-- **Memories** — paginated list (20/page) with filters (category, type, tag, quality, date, search)
-- **Timeline** — memories grouped by day
-- **Tags** — all tags with counts, rename/merge/delete operations
-- **Duplicates** — near-duplicate groups by cosine similarity (threshold slider)
-- **Conflicts** — explicit same-subject claim contradictions, with open/resolved filtering
-- **Review** — bounded read-only consistency inbox
-- **Embeddings** — UMAP 2D projection of all memory vectors
-- **Clusters** — semantic clusters (threshold + min size controls)
-- **Stale** — old + low-quality memories (cleanup candidates)
-- **Graph** — whole corpus by default, embedding links, optional typed-relation overlay, hub grouping, freshness halo, tier filtering
+### Pages
+
+| Page | What it shows |
+|---|---|
+| **Dashboard** | totals, category breakdown, tier distribution, most-accessed memories |
+| **Memories** | paginated list (20/page), filters by category, type, tag, quality, date, and search |
+| **Timeline** | memories grouped by day |
+| **Tags** | every tag with its count, plus rename, merge and delete |
+| **Duplicates** | near-duplicate groups by cosine similarity, threshold slider |
+| **Conflicts** | same-subject claims that contradict each other, open and resolved |
+| **Review** | bounded read-only consistency inbox: format drift, contradictions, broken references |
+| **Embeddings** | UMAP 2D projection of all vectors + local health diagnostics |
+| **Clusters** | semantic clusters, with threshold and minimum-size controls |
+| **Stale** | old and low-quality memories, the cleanup candidates |
+| **Graph** | whole corpus by default, embedding links, optional typed-relation overlay, hub grouping, freshness halo, tier filter |
 
 ### API endpoints
 
