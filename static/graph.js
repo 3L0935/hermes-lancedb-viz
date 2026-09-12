@@ -44,22 +44,21 @@ const colorHexDef = defaultColor.hex;
 async function loadGraph() {
   document.getElementById('loading').style.display = 'block';
   const threshold = document.getElementById('threshold-slider')?.value || 0.8;
-  const relationType = document.getElementById('relation-filter')?.value || '';
   const clusterMode = document.getElementById('cluster-mode')?.value || 'raw';
   const showDeclared = document.getElementById('show-declared')?.checked ? '1' : '0';
-  // No selection means the full graph, not an empty canvas. The default mode is
-  // embedding similarity only; typed relations are an opt-in overlay, and the hub
-  // modes group nodes by category or entity.
-  const query = selectedNodeId
-    ? '/api/graph?memory_id=' + encodeURIComponent(selectedNodeId) +
-      '&threshold=' + threshold + '&relation_types=' + encodeURIComponent(relationType)
-    : '/api/graph?threshold=' + threshold + '&cluster=' + encodeURIComponent(clusterMode) +
-      '&show_declared=' + showDeclared;
+  // The graph is ALWAYS the whole corpus. It is never reloaded as a per-memory
+  // sub-graph: that replaced the overview with a handful of nodes on every click
+  // and left no way back. Selecting a memory opens the sidebar over this graph.
+  const query = '/api/graph?threshold=' + threshold +
+    '&cluster=' + encodeURIComponent(clusterMode) + '&show_declared=' + showDeclared;
   try {
     const resp = await fetch(query);
     allData = await resp.json();
     renderGraph();
-    if (selectedNodeId && !allData.error && allData.nodes.some(node => node.id === selectedNodeId)) openSidebar(selectedNodeId);
+    if (selectedNodeId) {
+      if (allData.nodes?.some(node => node.id === selectedNodeId)) highlightTypedRelations(selectedNodeId);
+      else selectedNodeId = null;
+    }
   } catch (e) {
     console.error('Failed to load graph:', e);
     document.getElementById('loading').innerHTML = 'Load error. Check server.';
@@ -77,19 +76,16 @@ function renderGraph() {
     if (stats.db_size_mb != null) setEl('db-size', stats.db_size_mb + ' MB');
   }).catch(() => {});
 
-  // Global counts come from /api/stats (applied by the fetch above). The loaded
-  // sub-graph is a different number and must not overwrite it: on a fresh page
-  // there is no selection, so allData.nodes/edges are empty and the header read
-  // "Memories 0 / Entities 0 / Edges 0" on a database holding hundreds.
-  const subGraphNodes = allData.nodes?.length || 0;
-  const subGraphEdges = allData.edges?.length || 0;
+  // Global counts come from /api/stats (applied by the fetch above), never from
+  // the loaded graph: the header describes the whole database. The sub-label only
+  // reports how many memories are currently glowing for the selection.
   const subGraphLabel = document.getElementById('subgraph-count');
   if (subGraphLabel) {
-    subGraphLabel.textContent = selectedNodeId
-      ? `Neighborhood ${subGraphNodes} nodes / ${subGraphEdges} edges`
+    const glowCount = highlightedTypedEdges.size;
+    subGraphLabel.textContent = selectedNodeId && glowCount
+      ? 'Selected · ' + glowCount + ' related memories highlighted'
       : '';
   }
-  setEl('hidden-neighbor-count', (allData.hidden_neighbor_count || 0) + ' hidden by budget · ' + (allData.hidden_by_relation_filter || 0) + ' hidden by relation filter');
   const fleg = document.getElementById('fresh-legend');
   if (fleg) fleg.style.display = 'flex';
 
@@ -181,7 +177,7 @@ function renderGraph() {
 
     network.on('click', function(params) {
       if (params.nodes.length) {
-        loadNeighborhood(params.nodes[0]);
+        selectMemory(params.nodes[0]);
       } else {
         closeSidebar();
       }
@@ -192,10 +188,14 @@ function renderGraph() {
   setGraphPhysicsActive(graphIntersectionVisible && !document.hidden);
 }
 
-async function loadNeighborhood(nodeId) {
+// Selecting a memory is purely local: open the sidebar and glow its neighbourhood.
+// The graph itself is not reloaded, so the overview stays on screen and you can
+// click through memories without ever losing it.
+function selectMemory(nodeId) {
   selectedNodeId = nodeId;
   closeSearchPanel();
-  await loadGraph();
+  openSidebar(nodeId);
+  focusNode(nodeId);
 }
 
 function setGraphPhysicsActive(active) {
@@ -222,18 +222,25 @@ document.addEventListener('visibilitychange', () => setGraphPhysicsActive(graphI
 function highlightTypedRelations(nodeId) {
   // Reset previous highlights
   resetTypedHighlights();
+  if (!nodeId) return;
 
-  // Find typed edges involving nodeId
-  const relatedIds = new Set();
-  (allData.typed_edges || []).forEach(e => {
-    if (e.from === nodeId) relatedIds.add(e.to);
-    if (e.to === nodeId) relatedIds.add(e.from);
+  // Glow the selected node and its neighbours. Nothing is masked: the highlight is
+  // additive so the whole graph stays readable while a memory is selected.
+  const relatedIds = new Set([nodeId]);
+  (allData.edges || []).forEach(e => {
+    if (e.from === nodeId && e.to) relatedIds.add(e.to);
+    if (e.to === nodeId && e.from) relatedIds.add(e.from);
   });
 
-  highlightedTypedEdges = relatedIds;
+  // Cap the glow: at a low threshold a node can have hundreds of neighbours and
+  // lighting all of them up is noise, not information.
+  const ordered = [...relatedIds].slice(1, 25);
+  const glowIds = new Set([nodeId, ...ordered]);
+
+  highlightedTypedEdges = glowIds;
 
   // Apply violet glow to connected nodes
-  relatedIds.forEach(id => {
+  glowIds.forEach(id => {
     const node = allData.nodes.find(n => n.id === id);
     if (!node) return;
     nodes.update({
@@ -614,9 +621,11 @@ async function saveEdit(nodeId) {
 }
 
 function closeSidebar() {
+  selectedNodeId = null;
   resetTypedHighlights();
   document.getElementById('sidebar').classList.remove('open');
   if (network) network.unselectAll();
+  applyFilters();
 }
 
 function focusNode(nodeId) {
@@ -686,14 +695,15 @@ function updateBudgetLabel(matchCount, filtered) {
   if (!el) return;
   const total = (allData.nodes || []).length;
   const edges = (allData.edges || []).length;
-  if (selectedNodeId) {
-    const hidden = allData.hidden_neighbor_count || 0;
-    const byFilter = allData.hidden_by_relation_filter || 0;
-    el.textContent = hidden + ' hidden by budget · ' + byFilter + ' hidden by relation filter';
-    return;
-  }
-  el.textContent = total + ' memories · ' + edges + ' links' +
-    (filtered ? ' · ' + matchCount + ' match' : '');
+  const hidden = allData.hidden_neighbor_count || 0;
+  const byFilter = allData.hidden_by_relation_filter || 0;
+  // Only mention a budget when something was actually dropped. Printing
+  // "0 hidden by budget · 0 hidden by relation filter" on every selection
+  // described a truncation that no longer happens.
+  let text = total + ' memories · ' + edges + ' links';
+  if (filtered) text += ' · ' + matchCount + ' match';
+  if (hidden || byFilter) text += ' · ' + hidden + ' hidden by budget, ' + byFilter + ' by relation filter';
+  el.textContent = text;
 }
 
 function countEntities(nodesArr) {
@@ -732,7 +742,7 @@ async function doSemanticSearch() {
         '<span class="s-cat cat-' + safeCategory(r.category) + '">' + escapeHtml(cat) + '</span>' +
         '<span class="s-meta">score: ' + (r._distance ? r._distance.toFixed(2) : '0.00') + '</span>' +
         '<span class="s-why"><button class="why-btn" title="Why this result?" onclick="event.stopPropagation();explainResult(\'' + escapeJsString(r.id) + '\')">?</button></span>' +
-        '<div class="s-content" onclick="loadNeighborhood(\'' + escapeJsString(r.id) + '\')">' + escapeHtml((r.content || '').substring(0, 140)) + '</div></div>';
+        '<div class="s-content" onclick="selectMemory(\'' + escapeJsString(r.id) + '\')">' + escapeHtml((r.content || '').substring(0, 140)) + '</div></div>';
     }).join('');
   } catch(e) { panel.innerHTML = '<div class="search-empty">Search failed.</div>'; }
 }
@@ -815,7 +825,7 @@ function explainResult(resultId) {
   const others = rows.filter(r => !selected || String(r.id) !== String(selected.id)).slice(0, WHY_PANEL_MAX_ROWS);
   if (others.length) {
     body += '<div class="why-section"><h4>Other candidates (max ' + WHY_PANEL_MAX_ROWS + ')</h4>';
-    body += others.map(r => '<div class="why-row why-other" onclick="loadNeighborhood(\'' + escapeJsString(r.id) + '\')">' +
+    body += others.map(r => '<div class="why-row why-other" onclick="selectMemory(\'' + escapeJsString(r.id) + '\')">' +
       '<span class="why-label">' + escapeHtml(r.category || 'fact') + '</span>' +
       '<span class="why-value">' + escapeHtml((r.content || '').substring(0, 80)) + '</span></div>').join('');
     body += '</div>';
@@ -885,6 +895,15 @@ document.getElementById('cat-filter').addEventListener('change', applyFilters);
 document.getElementById('relation-filter').addEventListener('change', () => { closeSidebar(); loadGraph(); });
 document.getElementById('refresh-btn').addEventListener('click', () => { closeSearchPanel(); closeSidebar(); loadGraph(); });
 document.getElementById('sidebar-close').addEventListener('click', closeSidebar);
+// Escape is the obvious way out of a selection; without it the only exit was
+// clicking empty canvas, which is not discoverable.
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    const panel = document.getElementById('search-panel');
+    if (panel && panel.classList.contains('visible')) { closeSearchPanel(); return; }
+    if (selectedNodeId) closeSidebar();
+  }
+});
 
 // Helpers
 function escapeHtml(str) { const d = document.createElement('div'); d.textContent = str == null ? '' : String(str); return d.innerHTML; }

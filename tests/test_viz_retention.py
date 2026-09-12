@@ -606,19 +606,44 @@ class VizRetentionTests(unittest.TestCase):
         self.assertGreater(result["hidden_neighbor_count"], 0)
         self.assertEqual({"nodes": 4, "edges": 3, "semantic_candidates": 30}, result["budgets"])
 
-    def test_graph_ui_loads_selected_neighborhood_and_pauses_off_screen_physics(self):
+    def test_graph_ui_selects_a_memory_without_reloading_the_graph(self):
+        """Selecting a memory must not swap the overview for a sub-graph.
+
+        Reloading per selection replaced the whole graph with a handful of nodes on
+        every click, and the only way out was clicking empty canvas. The graph is now
+        always the full corpus; selection opens the sidebar and glows neighbours.
+        """
         html = (ROOT / "static" / "index.html").read_text()
         app = (ROOT / "static" / "app.js").read_text()
         graph = (ROOT / "static" / "graph.js").read_text()
 
         self.assertIn('id="relation-filter"', html)
         self.assertIn('id="hidden-neighbor-count"', html)
-        self.assertIn("memory_id=' + encodeURIComponent(selectedNodeId)", graph)
+        self.assertIn('id="cluster-mode"', html)
+        self.assertIn('id="show-declared"', html)
         self.assertIn("kind: 'declared'", graph)
         self.assertIn("kind: 'semantic'", graph)
         self.assertIn("new IntersectionObserver", graph)
         self.assertIn("network.stopSimulation()", graph)
         self.assertIn("pauseGraphPhysics", app)
+
+        # No per-memory graph query survives, and selection stays local.
+        load_graph = re.search(r"async function loadGraph\(\)[\s\S]*?\n}", graph).group(0)
+        self.assertNotIn("memory_id=", load_graph)
+        self.assertIn("cluster=", load_graph)
+        self.assertNotIn("loadNeighborhood", graph)
+        self.assertIn("function selectMemory(", graph)
+
+        # The highlight must be additive: hiding nodes on selection is the bug.
+        highlight = re.search(r"function highlightTypedRelations[\s\S]*?\n}", graph).group(0)
+        self.assertNotIn("hidden:", highlight)
+        self.assertNotIn("hidden = true", highlight)
+        # glowIds is assigned before it exists was a real crash on every click.
+        self.assertLess(highlight.index("const glowIds"), highlight.index("highlightedTypedEdges = glowIds"))
+
+        # There must be an exit from the selected state.
+        close_sidebar = re.search(r"function closeSidebar\(\)[\s\S]*?\n}", graph).group(0)
+        self.assertIn("selectedNodeId = null", close_sidebar)
 
     def test_health_diagnostics_separate_useful_history_fts_and_ollama_error(self):
         with tempfile.TemporaryDirectory() as tmp:
