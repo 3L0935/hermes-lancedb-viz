@@ -12,6 +12,11 @@ import sys
 import numpy as np
 
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
 MODEL = os.environ.get("LANCE_EMBED_MODEL", "nomic-embed-text")
 OLLAMA_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/") + "/api/embed"
 BATCH_SIZE = 10
@@ -69,42 +74,46 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     import httpx
+    from plugin.store import LanceDBStore
 
+    store = LanceDBStore(args.db_path)
+    table = store._table
     updated = 0
     failed = 0
-    for start in range(0, len(entries), args.batch_size):
-        batch = entries[start:start + args.batch_size]
-        texts = [
-            re.sub(r"\n::relations::.*", "", str(entry["content"])).strip()
-            or str(entry["content"])
-            for entry in batch
-        ]
-        try:
-            response = httpx.post(
-                OLLAMA_URL,
-                json={"model": MODEL, "input": texts, "keep_alive": "30s"},
-                timeout=60,
-            )
-            response.raise_for_status()
-            embeddings = response.json().get("embeddings", [])
-            if len(embeddings) != len(batch):
-                raise ValueError("embedding response cardinality mismatch")
-            vectors = [np.asarray(vector, dtype=np.float32) for vector in embeddings]
-            if any(vector.shape != (768,) or not np.isfinite(vector).all() for vector in vectors):
-                raise ValueError("embedding response contains invalid vectors")
-        except Exception as error:
-            failed += len(batch)
-            print(f"ERROR batch {start}: {error}", file=sys.stderr)
-            continue
+    with store.write_batch():
+        for start in range(0, len(entries), args.batch_size):
+            batch = entries[start:start + args.batch_size]
+            texts = [
+                re.sub(r"\n::relations::.*", "", str(entry["content"])).strip()
+                or str(entry["content"])
+                for entry in batch
+            ]
+            try:
+                response = httpx.post(
+                    OLLAMA_URL,
+                    json={"model": MODEL, "input": texts, "keep_alive": "30s"},
+                    timeout=60,
+                )
+                response.raise_for_status()
+                embeddings = response.json().get("embeddings", [])
+                if len(embeddings) != len(batch):
+                    raise ValueError("embedding response cardinality mismatch")
+                vectors = [np.asarray(vector, dtype=np.float32) for vector in embeddings]
+                if any(vector.shape != (768,) or not np.isfinite(vector).all() for vector in vectors):
+                    raise ValueError("embedding response contains invalid vectors")
+            except Exception as error:
+                failed += len(batch)
+                print(f"ERROR batch {start}: {error}", file=sys.stderr)
+                continue
 
-        for entry, vector in zip(batch, vectors):
-            memory_id = str(entry["id"])
-            table.update(
-                where=f"id = {_sql_literal(memory_id)}",
-                values={"vector": vector.tolist()},
-            )
-            updated += 1
-        print(f"[{min(start + args.batch_size, len(entries))}/{len(entries)}] re-embedded")
+            for entry, vector in zip(batch, vectors):
+                memory_id = str(entry["id"])
+                table.update(
+                    where=f"id = {_sql_literal(memory_id)}",
+                    values={"vector": vector.tolist()},
+                )
+                updated += 1
+            print(f"[{min(start + args.batch_size, len(entries))}/{len(entries)}] re-embedded")
 
     print(f"Done: {updated} updated, {failed} failed with {MODEL}.")
     return 1 if failed else 0

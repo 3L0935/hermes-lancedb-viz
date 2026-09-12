@@ -28,11 +28,25 @@ class DeployContractTests(unittest.TestCase):
         self.assertIn('VIZ="$HERMES_HOME/lancedb-viz"', script)
         self.assertIn("store.py memory_contract.py __init__.py plugin.yaml", script)
         self.assertIn("lancedb-viz.service", script)
+        self.assertIn("lancedb-viz-maintenance.timer", script)
+        self.assertIn("enable --now lancedb-viz-maintenance.timer", script)
+        self.assertIn("compact-if-needed.py", script)
         self.assertIn("--port 7778", unit)
         self.assertIn("docker restart", script)
         self.assertIn("127.0.0.1:7777", script)
         self.assertIn("wait_for_http", script)
         self.assertIn("--dry-run", script)
+
+        maintenance_service = (
+            ROOT / "systemd" / "lancedb-viz-maintenance.service"
+        ).read_text()
+        maintenance_timer = (
+            ROOT / "systemd" / "lancedb-viz-maintenance.timer"
+        ).read_text()
+        self.assertIn("http://127.0.0.1:7777", maintenance_service)
+        self.assertIn("TimeoutStartSec=30min", maintenance_service)
+        self.assertIn("OnUnitActiveSec=1h", maintenance_timer)
+        self.assertIn("Persistent=true", maintenance_timer)
 
     def test_verify_defaults_to_docker_7777_with_optional_systemd_mode(self):
         script = (ROOT / "scripts" / "verify-setup.sh").read_text()

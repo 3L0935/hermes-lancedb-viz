@@ -317,7 +317,7 @@ GET  /api/timeline                      — memories grouped by day
 GET  /api/duplicates                    — duplicate groups (`threshold`)
 GET  /api/projection                    — UMAP projection (`n_neighbors`, `min_dist`)
 GET  /api/health                        — read-only storage and dependency diagnostics
-GET  /api/maintenance/compact/plan      — read-only compaction and backup plan
+GET  /api/maintenance/compact/plan      — read-only thresholds, compaction, and backup plan
 GET  /api/clusters                      — semantic clusters (`threshold`, `min_size`)
 GET  /api/stale                         — stale memories (`days`, `quality_max`)
 GET  /api/conflicts                     — contradiction ledger (`status`, `memory_id`, `limit`)
@@ -362,8 +362,17 @@ the result as evidence.
 
 ### Maintenance and compaction
 
-Compaction is manual. Inspect the read-only plan first, pause external writers,
-then send the explicit confirmation:
+Store construction and every read path leave the existing FTS index untouched.
+The outer writer batch owns one FTS refresh when the `memories` version changes;
+raw batch scripts must use `with store.write_batch():` so they share that
+boundary and the inter-process writer lock. LanceDB 0.34.0 searches unindexed
+fragments during an active batch, and the regression suite verifies recall both
+before and after the refresh.
+
+The plan is read-only and reports whether fixed bounds are exceeded: 64 table
+versions, 64 fragments, or 4 abandoned index directories. The deployed
+`lancedb-viz-maintenance.timer` checks it hourly and invokes the confirmed route
+only when `recommended` is true. The same route remains available manually:
 
 ```bash
 curl -fsS http://127.0.0.1:7777/api/maintenance/compact/plan \
@@ -376,12 +385,15 @@ curl -fsS -X POST \
 ```
 
 Apply creates an atomic `lancedb-pre-compact-*` backup before touching any
-table, retains the two newest managed backups, compacts all four tables, and
-verifies row counts, readable versions, and the memories FTS index. A failed
-response includes `failed_step`; once backup creation succeeded it also
-includes `backup_created`, which remains available for recovery. The in-server
-lock blocks duplicate compactions only, so it does not replace a write pause
-across other processes.
+table, retains the two newest managed backups, compacts all four tables, removes
+only index UUID directories absent from current Lance metadata, and verifies
+row counts, readable versions, active index directories, and the memories FTS
+index. If the engine cannot expose active UUIDs, cleanup is skipped and reported
+as `None`; no directory is guessed. A failed response includes `failed_step`;
+once backup creation succeeded it also includes `backup_created`, which remains
+available for recovery. There is no automatic restore. Cooperating store
+writers share an advisory lock with maintenance; pause any raw writer that does
+not use `store.write_batch()`.
 
 ## Scripts
 
@@ -393,6 +405,8 @@ Hermes gateway: Python does not reload the already imported plugin module, so
 always restart `hermes-gateway` after plugin changes. By default the script
 restarts and verifies the existing Docker container on port 7777. The
 `--systemd-fallback` flag targets only the disabled recovery service on 7778.
+Deployment also installs and enables the hourly maintenance timer; it targets
+the primary Docker endpoint on port 7777.
 
 ```bash
 ./scripts/deploy-local.sh --dry-run

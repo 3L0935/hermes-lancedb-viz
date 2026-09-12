@@ -1,16 +1,28 @@
 import importlib.util
+import fcntl
 import os
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
+from uuid import uuid4
 
 import lancedb
 import pyarrow as pa
 from lancedb.index import FTS
+from plugin.store import LanceDBStore
 
-from server.maintenance import MAINTENANCE_TABLES, compact_lancedb, compaction_plan
+from server.maintenance import (
+    MAINTENANCE_MAX_FRAGMENTS,
+    MAINTENANCE_TABLES,
+    _active_index_uuids,
+    _physical_index_uuids,
+    compact_lancedb,
+    compaction_plan,
+    maintenance_lock_path,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,12 +46,43 @@ def create_fixture_database(path: Path) -> None:
 
 
 class MaintenanceTests(unittest.TestCase):
+    def test_active_index_uuid_helper_accepts_dicts_and_attributes(self):
+        first = str(uuid4())
+        second = str(uuid4())
+
+        class Dataset:
+            def list_indices(self):
+                return [{"uuid": first}, SimpleNamespace(uuid=second)]
+
+        table = SimpleNamespace(to_lance=lambda: Dataset())
+
+        self.assertEqual({first, second}, _active_index_uuids(table))
+
+    def test_active_index_uuid_helper_falls_back_when_descriptions_lack_segments(self):
+        active = str(uuid4())
+
+        class Dataset:
+            def describe_indices(self):
+                return [SimpleNamespace(name="content_idx")]
+
+            def list_indices(self):
+                return [{"uuid": active}]
+
+        table = SimpleNamespace(to_lance=lambda: Dataset())
+
+        self.assertEqual({active}, _active_index_uuids(table))
+
     def test_compaction_creates_atomic_backup_purges_only_old_compaction_backups_and_verifies(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             db_path = root / "lancedb"
             backups_path = root / "backups"
             create_fixture_database(db_path)
+            abandoned_index = (
+                db_path / "memories.lance" / "_indices" / str(uuid4())
+            )
+            abandoned_index.mkdir(parents=True)
+            (abandoned_index / "marker").write_text("abandoned")
             backups_path.mkdir()
             names = [
                 "lancedb-pre-compact-20260909-010101",
@@ -64,6 +107,11 @@ class MaintenanceTests(unittest.TestCase):
             self.assertEqual(names[:2], [Path(path).name for path in result["backups_deleted"]])
             self.assertTrue(Path(result["backup_created"]).is_dir())
             self.assertTrue((Path(result["backup_created"]) / "memories.lance").is_dir())
+            self.assertTrue(
+                (Path(result["backup_created"]) / "memories.lance" / "_indices"
+                 / abandoned_index.name / "marker").is_file()
+            )
+            self.assertFalse(abandoned_index.exists())
             self.assertTrue(unrelated.is_dir())
             self.assertEqual(2, len(list(backups_path.glob("lancedb-pre-compact-*"))))
             self.assertEqual([], list(backups_path.glob(".*.tmp-*")))
@@ -72,6 +120,99 @@ class MaintenanceTests(unittest.TestCase):
                 self.assertEqual(1, result["rows"][name]["after"])
                 self.assertTrue(result["rows"][name]["version_readable"])
             self.assertEqual(0, result["fts_num_unindexed_rows"])
+            self.assertGreaterEqual(
+                result["orphan_index_directories_removed"]["memories"], 1
+            )
+            memories = lancedb.connect(str(db_path)).open_table("memories")
+            self.assertEqual(
+                _active_index_uuids(memories),
+                _physical_index_uuids(db_path, "memories"),
+            )
+
+    def test_backup_failure_leaves_orphan_index_directory_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "lancedb"
+            backups_path = root / "backups"
+            create_fixture_database(db_path)
+            orphan = db_path / "memories.lance" / "_indices" / str(uuid4())
+            orphan.mkdir(parents=True)
+            (orphan / "marker").write_text("must survive")
+
+            with patch("server.maintenance.shutil.copytree", side_effect=OSError("copy failed")):
+                result = compact_lancedb(db_path, backups_path)
+
+            self.assertFalse(result["success"])
+            self.assertEqual("backup", result["failed_step"])
+            self.assertTrue((orphan / "marker").is_file())
+
+    def test_orphan_cleanup_failure_reports_step_and_keeps_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "lancedb"
+            backups_path = root / "backups"
+            create_fixture_database(db_path)
+            orphan = db_path / "memories.lance" / "_indices" / str(uuid4())
+            orphan.mkdir(parents=True)
+
+            with patch("server.maintenance.shutil.rmtree", side_effect=OSError("delete failed")):
+                result = compact_lancedb(db_path, backups_path)
+
+            self.assertFalse(result["success"])
+            self.assertEqual("cleanup_indices.memories", result["failed_step"])
+            self.assertTrue(Path(result["backup_created"]).is_dir())
+            self.assertTrue(orphan.is_dir())
+
+    def test_unknown_active_index_uuids_skip_cleanup_without_guessing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "lancedb"
+            backups_path = root / "backups"
+            create_fixture_database(db_path)
+            orphan = db_path / "memories.lance" / "_indices" / str(uuid4())
+            orphan.mkdir(parents=True)
+
+            with patch("server.maintenance._active_index_uuids", return_value=None):
+                result = compact_lancedb(db_path, backups_path)
+
+            self.assertTrue(result["success"], result)
+            self.assertIsNone(result["orphan_index_directories_removed"]["memories"])
+            self.assertTrue(orphan.is_dir())
+
+    def test_compaction_returns_busy_before_backup_when_writer_lock_is_held(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "lancedb"
+            backups_path = root / "backups"
+            create_fixture_database(db_path)
+            lock_file = maintenance_lock_path(db_path).open("a+")
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                result = compact_lancedb(db_path, backups_path)
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+
+            self.assertFalse(result["success"])
+            self.assertEqual("lock", result["failed_step"])
+            self.assertEqual("maintenance_lock_busy", result["code"])
+            self.assertFalse(backups_path.exists())
+
+    def test_store_writer_and_maintenance_share_the_mounted_database_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "lancedb"
+            backups_path = root / "backups"
+            store = LanceDBStore(db_path)
+
+            self.assertEqual(db_path / ".write.lock", store.mutation_lock_path)
+            self.assertEqual(store.mutation_lock_path, maintenance_lock_path(db_path))
+            with store.write_batch():
+                result = compact_lancedb(db_path, backups_path)
+
+            self.assertFalse(result["success"])
+            self.assertEqual("maintenance_lock_busy", result["code"])
+            self.assertFalse(backups_path.exists())
 
     def test_compaction_refuses_insufficient_space_without_writing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,6 +257,34 @@ class MaintenanceTests(unittest.TestCase):
             self.assertTrue(all("lancedb-pre-compact-" in path for path in plan["backups_to_delete"]))
             self.assertEqual(20, plan["size_before_bytes"])
             self.assertEqual(5, plan["estimated_after_bytes"])
+            self.assertFalse(plan["recommended"])
+            self.assertEqual([], plan["trigger_reasons"])
+
+    def test_plan_recommends_compaction_from_bounded_resource_thresholds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db_path = root / "lancedb"
+            backups_path = root / "backups"
+            db_path.mkdir()
+
+            plan = compaction_plan(
+                db_path,
+                backups_path,
+                estimated_after_bytes=0,
+                diagnostics={
+                    "tables": {
+                        "memories": {
+                            "versions": 2,
+                            "fragments": MAINTENANCE_MAX_FRAGMENTS + 1,
+                        }
+                    },
+                    "fts": {"orphan_index_directories": None},
+                },
+            )
+
+            self.assertTrue(plan["recommended"])
+            self.assertEqual(1, len(plan["trigger_reasons"]))
+            self.assertIn("memories.fragments", plan["trigger_reasons"][0])
 
     def test_server_rejects_second_compaction_and_compose_mounts_only_backup_root(self):
         self.assertTrue(server._compaction_lock.acquire(blocking=False))

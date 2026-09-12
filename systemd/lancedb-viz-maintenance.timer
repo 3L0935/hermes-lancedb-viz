@@ -1,0 +1,12 @@
+[Unit]
+Description=Check bounded LanceDB maintenance thresholds hourly
+
+[Timer]
+OnBootSec=15m
+OnUnitActiveSec=1h
+RandomizedDelaySec=5m
+Persistent=true
+Unit=lancedb-viz-maintenance.service
+
+[Install]
+WantedBy=timers.target

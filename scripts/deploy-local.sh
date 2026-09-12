@@ -8,6 +8,8 @@ CANONICAL="$HERMES_HOME/plugins/lancedb"
 RUNTIME="$HERMES_AGENT_HOME/plugins/memory/lancedb"
 VIZ="$HERMES_HOME/lancedb-viz"
 UNIT="$HOME/.config/systemd/user/lancedb-viz.service"
+MAINTENANCE_UNIT="$HOME/.config/systemd/user/lancedb-viz-maintenance.service"
+MAINTENANCE_TIMER="$HOME/.config/systemd/user/lancedb-viz-maintenance.timer"
 DRY_RUN=0
 SYSTEMD_FALLBACK=0
 
@@ -46,7 +48,7 @@ wait_for_http() {
   return 1
 }
 
-run install -d "$CANONICAL" "$RUNTIME" "$VIZ/static" "$(dirname "$UNIT")"
+run install -d "$CANONICAL" "$RUNTIME" "$VIZ/static" "$VIZ/scripts" "$(dirname "$UNIT")"
 for file in store.py memory_contract.py __init__.py plugin.yaml; do
   run install -m 0644 "$ROOT/plugin/$file" "$CANONICAL/$file"
   run install -m 0644 "$ROOT/plugin/$file" "$RUNTIME/$file"
@@ -55,10 +57,13 @@ run install -m 0644 "$ROOT/server/server.py" "$VIZ/server.py"
 # server.py imports maintenance.py (health diagnostics + manual compaction);
 # without it the deployed viz fails to import and serves no new routes.
 run install -m 0644 "$ROOT/server/maintenance.py" "$VIZ/maintenance.py"
+run install -m 0755 "$ROOT/scripts/compact-if-needed.py" "$VIZ/scripts/compact-if-needed.py"
 for file in "$ROOT"/static/*; do
   run install -m 0644 "$file" "$VIZ/static/$(basename "$file")"
 done
 run install -m 0644 "$ROOT/systemd/lancedb-viz.service" "$UNIT"
+run install -m 0644 "$ROOT/systemd/lancedb-viz-maintenance.service" "$MAINTENANCE_UNIT"
+run install -m 0644 "$ROOT/systemd/lancedb-viz-maintenance.timer" "$MAINTENANCE_TIMER"
 run systemctl --user daemon-reload
 
 if [[ "$SYSTEMD_FALLBACK" -eq 1 ]]; then
@@ -75,8 +80,12 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   else
     docker inspect --format '{{.State.Running}}' lancedb-viz | grep -qx true
     wait_for_http http://127.0.0.1:7777/
+    run systemctl --user enable --now lancedb-viz-maintenance.timer
     printf 'Deployment verified: primary Docker viz active on 127.0.0.1:7777\n'
   fi
 else
+  if [[ "$SYSTEMD_FALLBACK" -eq 0 ]]; then
+    run systemctl --user enable --now lancedb-viz-maintenance.timer
+  fi
   printf 'Dry-run only; no files or services changed.\n'
 fi

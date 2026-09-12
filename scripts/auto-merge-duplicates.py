@@ -20,9 +20,12 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 HERMES_AGENT = os.path.expanduser("~/.hermes/hermes-agent")
 
-sys.path.insert(0, HERMES_AGENT)
-
-from plugins.memory.lancedb.store import LanceDBStore, MemoryPatch
+sys.path.insert(0, REPO_ROOT)
+try:
+    from plugin.store import LanceDBStore, MemoryPatch
+except ImportError:  # Installed script fallback.
+    sys.path.insert(0, HERMES_AGENT)
+    from plugins.memory.lancedb.store import LanceDBStore, MemoryPatch
 
 
 def find_duplicate_groups(store: LanceDBStore, threshold: float = 0.92) -> list[list[dict]]:
@@ -440,7 +443,11 @@ def main():
     print(f"Total memories: {store.count()}")
     print()
 
-    stats = run_merge(store, args.threshold, apply=args.apply)
+    if args.apply:
+        with store.write_batch():
+            stats = run_merge(store, args.threshold, apply=True)
+    else:
+        stats = run_merge(store, args.threshold, apply=False)
 
     print("=" * 60)
     print(f"Summary:")

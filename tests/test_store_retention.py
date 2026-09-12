@@ -26,6 +26,22 @@ def fake_embed(_self, text: str) -> np.ndarray:
     return vector / norm if norm else vector
 
 
+def storage_snapshot(db_path: Path) -> dict[str, int]:
+    """Capture physical Lance storage counts without opening the database."""
+    table_path = db_path / "memories.lance"
+    indices_path = table_path / "_indices"
+    return {
+        "bytes": sum(
+            item.stat().st_size for item in table_path.rglob("*") if item.is_file()
+        ),
+        "versions": len(list((table_path / "_versions").glob("*.manifest"))),
+        "fragments": len(list((table_path / "data").glob("*.lance"))),
+        "index_directories": len([
+            item for item in indices_path.iterdir() if item.is_dir()
+        ]) if indices_path.is_dir() else 0,
+    }
+
+
 class StoreRetentionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -120,24 +136,50 @@ class StoreRetentionTests(unittest.TestCase):
 
         self.assertEqual(indexed_version, reopened._table.version)
 
-    def test_reopen_rebuilds_fts_index_when_rows_are_unindexed(self):
-        self.add("Project:Alpha state=active [Tier=2]")
-        stale_version = self.store._table.version
-        stale_index = next(
+    def test_search_on_reopened_store_does_not_change_physical_storage(self):
+        memory_id = self.add("Project:Alpha state=active [Tier=2]")
+        self.store._ensure_fts_index(self.store._table)
+        self.store._table.update(
+            "id IS NOT NULL",
+            {"quality": 0.75},
+        )
+        before = storage_snapshot(Path(self.tmp.name))
+
+        reopened = LanceDBStore(Path(self.tmp.name))
+        reopened._embed = fake_embed.__get__(reopened, LanceDBStore)
+        reopened.search("state active", mode="lexical")
+        reopened.get_by_id(memory_id)
+        reopened.get_all()
+        reopened.graph()
+
+        self.assertEqual(before, storage_snapshot(Path(self.tmp.name)))
+
+    def test_writer_batch_refreshes_fts_once_and_preserves_new_row_recall(self):
+        self.add("Project:Baseline state=active [Tier=2]")
+        before = storage_snapshot(Path(self.tmp.name))
+
+        with self.store.write_batch():
+            first_id = self.add("Project:Alpha ultrararetoken=enabled [Tier=2]")
+            self.add("Project:Beta state=active [Tier=2]")
+            unindexed_rows = self.store._table.search(
+                "ultrararetoken", query_type="fts"
+            ).limit(10).to_list()
+
+        after = storage_snapshot(Path(self.tmp.name))
+        indexed_rows = self.store._table.search(
+            "ultrararetoken", query_type="fts"
+        ).limit(10).to_list()
+        index = next(
             item for item in self.store._table.list_indices()
             if item.index_type == "FTS" and item.columns == ["content"]
         )
-        self.assertGreater(stale_index.num_unindexed_rows, 0)
 
-        reopened = LanceDBStore(Path(self.tmp.name))
-        rebuilt_index = next(
-            item for item in reopened._table.list_indices()
-            if item.index_type == "FTS" and item.columns == ["content"]
-        )
-
-        self.assertGreater(reopened._table.version, stale_version)
-        self.assertEqual(reopened.count(), rebuilt_index.num_indexed_rows)
-        self.assertEqual(0, rebuilt_index.num_unindexed_rows)
+        self.assertIn(first_id, [row["id"] for row in unindexed_rows])
+        self.assertIn(first_id, [row["id"] for row in indexed_rows])
+        self.assertGreater(float(unindexed_rows[0]["_score"]), 0.0)
+        self.assertGreater(float(indexed_rows[0]["_score"]), 0.0)
+        self.assertEqual(0, index.num_unindexed_rows)
+        self.assertEqual(1, after["index_directories"] - before["index_directories"])
 
     def test_direct_raw_add_is_fenced_from_cron_style_bypass(self):
         with self.assertRaises(MemoryContractError) as caught:

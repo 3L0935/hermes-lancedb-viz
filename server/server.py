@@ -1334,6 +1334,7 @@ def api_get_compaction_plan() -> dict:
         LANCEDB_PATH,
         HERMES_HOME / "backups",
         estimated_after_bytes=int(estimate.get("estimated_after_bytes") or 0),
+        diagnostics=health,
     )
 
 
@@ -1696,15 +1697,16 @@ def api_bulk_type(data: dict) -> dict:
         store = _get_store()
         updated = 0
         errors = []
-        for mid in memory_ids:
-            try:
-                result = _structured_update(store, mid, {"type": mem_type})
-                if result.get("success"):
-                    updated += 1
-                else:
+        with store.write_batch():
+            for mid in memory_ids:
+                try:
+                    result = _structured_update(store, mid, {"type": mem_type})
+                    if result.get("success"):
+                        updated += 1
+                    else:
+                        errors.append(mid)
+                except Exception:
                     errors.append(mid)
-            except Exception:
-                errors.append(mid)
         _invalidate_cache()
         return {"updated": updated, "errors": errors}
     except Exception as e:

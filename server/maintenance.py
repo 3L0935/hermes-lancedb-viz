@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import fcntl
 import os
 from pathlib import Path
 import shutil
@@ -10,7 +11,7 @@ import time
 from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 
 MAINTENANCE_TABLES = (
@@ -21,6 +22,79 @@ MAINTENANCE_TABLES = (
 )
 COMPACTION_BACKUP_PREFIX = "lancedb-pre-compact-"
 COMPACTION_BACKUPS_TO_KEEP = 2
+MAINTENANCE_MAX_VERSIONS = 64
+MAINTENANCE_MAX_FRAGMENTS = 64
+MAINTENANCE_MAX_ORPHAN_INDEX_DIRECTORIES = 4
+
+
+def maintenance_lock_path(db_path: Path) -> Path:
+    """Return the lock shared with `LanceDBStore.write_batch()`."""
+    db_path = Path(db_path).resolve()
+    return db_path / ".write.lock"
+
+
+def _value(item: Any, key: str) -> Any:
+    if isinstance(item, dict):
+        return item.get(key)
+    return getattr(item, key, None)
+
+
+def _active_index_uuids(table: Any) -> set[str] | None:
+    """Return index UUIDs referenced by current Lance metadata, or None."""
+    try:
+        dataset = table.to_lance()
+        if hasattr(dataset, "describe_indices"):
+            descriptions = list(dataset.describe_indices())
+            segment_lists = [_value(description, "segments") for description in descriptions]
+            if descriptions and any(segments is None for segments in segment_lists):
+                indices = dataset.list_indices()
+            else:
+                indices = [
+                    segment
+                    for segments in segment_lists
+                    for segment in (segments or [])
+                ]
+        else:
+            indices = dataset.list_indices()
+    except Exception:
+        return None
+    active = set()
+    for index in indices:
+        value = _value(index, "uuid")
+        if value is None:
+            return None
+        try:
+            active.add(str(UUID(str(value))))
+        except (TypeError, ValueError, AttributeError):
+            return None
+    return active
+
+
+def _physical_index_uuids(db_path: Path, table_name: str) -> set[str]:
+    """List UUID-shaped physical index directories without opening the table."""
+    root = Path(db_path) / f"{table_name}.lance" / "_indices"
+    if not root.is_dir():
+        return set()
+    found = set()
+    for path in root.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            found.add(str(UUID(path.name)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return found
+
+
+def _orphan_index_uuids(
+    db_path: Path,
+    table_name: str,
+    table: Any,
+) -> set[str] | None:
+    active = _active_index_uuids(table)
+    if active is None:
+        return None
+    return _physical_index_uuids(db_path, table_name) - active
 
 
 def _stat_value(stats: Any, key: str, default: int = 0) -> int:
@@ -137,6 +211,7 @@ def compaction_plan(
     backups_path: Path,
     *,
     estimated_after_bytes: int,
+    diagnostics: dict[str, Any] | None = None,
     now: Callable[[], datetime] = datetime.now,
 ) -> dict[str, Any]:
     """Describe the exact next backup and retention action without writing."""
@@ -145,16 +220,48 @@ def compaction_plan(
     backup_to_create = _timestamped_backup_path(backups_path, now)
     existing = _compaction_backups(backups_path)
     delete_count = max(0, len(existing) + 1 - COMPACTION_BACKUPS_TO_KEEP)
+    trigger_reasons = []
+    diagnostics = diagnostics or {}
+    for name, table in (diagnostics.get("tables") or {}).items():
+        versions = table.get("versions") if isinstance(table, dict) else None
+        fragments = table.get("fragments") if isinstance(table, dict) else None
+        if versions is not None and int(versions) > MAINTENANCE_MAX_VERSIONS:
+            trigger_reasons.append(
+                f"{name}.versions={int(versions)}>{MAINTENANCE_MAX_VERSIONS}"
+            )
+        if fragments is not None and int(fragments) > MAINTENANCE_MAX_FRAGMENTS:
+            trigger_reasons.append(
+                f"{name}.fragments={int(fragments)}>{MAINTENANCE_MAX_FRAGMENTS}"
+            )
+    fts = diagnostics.get("fts") or {}
+    orphan_directories = (
+        fts.get("orphan_index_directories") if isinstance(fts, dict) else None
+    )
+    if (
+        orphan_directories is not None
+        and int(orphan_directories) > MAINTENANCE_MAX_ORPHAN_INDEX_DIRECTORIES
+    ):
+        trigger_reasons.append(
+            "memories.orphan_index_directories="
+            f"{int(orphan_directories)}>{MAINTENANCE_MAX_ORPHAN_INDEX_DIRECTORIES}"
+        )
     return {
         "manual": True,
+        "recommended": bool(trigger_reasons),
+        "trigger_reasons": trigger_reasons,
+        "thresholds": {
+            "max_versions": MAINTENANCE_MAX_VERSIONS,
+            "max_fragments": MAINTENANCE_MAX_FRAGMENTS,
+            "max_orphan_index_directories": MAINTENANCE_MAX_ORPHAN_INDEX_DIRECTORIES,
+        },
         "size_before_bytes": directory_size(db_path),
         "estimated_after_bytes": max(0, int(estimated_after_bytes)),
         "backup_to_create": str(backup_to_create),
         "backups_to_delete": [str(path) for path in existing[:delete_count]],
         "retained_backup_count": COMPACTION_BACKUPS_TO_KEEP,
         "concurrency_warning": (
-            "Only duplicate compactions in this server are blocked; writes from another "
-            "process are not protected. Run this manual maintenance action during a write pause."
+            "Cooperating LanceDBStore writers share an advisory lock with compaction; "
+            "pause any raw external writer that does not use the store batch API."
         ),
     }
 
@@ -177,8 +284,56 @@ def compact_lancedb(
     connect: Callable[[str], Any] | None = None,
     now: Callable[[], datetime] = datetime.now,
 ) -> dict[str, Any]:
-    """Back up, retain two managed backups, compact, then verify every table."""
+    """Acquire the writer lock, then run backup-first compaction."""
     started = time.perf_counter()
+    resolved_db_path = Path(db_path).resolve()
+    if not resolved_db_path.is_dir():
+        return _failure(
+            "preflight", f"database directory does not exist: {resolved_db_path}", started
+        )
+    lock_file = None
+    try:
+        lock_file = maintenance_lock_path(resolved_db_path).open("a+")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        if lock_file is not None:
+            lock_file.close()
+        return _failure(
+            "lock",
+            "another cooperating writer or compaction holds the database lock",
+            started,
+            code="maintenance_lock_busy",
+        )
+    except Exception as error:
+        if lock_file is not None:
+            lock_file.close()
+        return _failure("lock", f"maintenance lock failed: {error}", started)
+    try:
+        return _compact_lancedb_locked(
+            resolved_db_path,
+            backups_path,
+            disk_usage=disk_usage,
+            connect=connect,
+            now=now,
+            started=started,
+        )
+    finally:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+
+def _compact_lancedb_locked(
+    db_path: Path,
+    backups_path: Path,
+    *,
+    disk_usage: Callable[[str | os.PathLike[str]], Any] = shutil.disk_usage,
+    connect: Callable[[str], Any] | None = None,
+    now: Callable[[], datetime] = datetime.now,
+    started: float | None = None,
+) -> dict[str, Any]:
+    """Back up, retain two managed backups, compact, then verify every table."""
+    if started is None:
+        started = time.perf_counter()
     db_path = Path(db_path).resolve()
     backups_path = Path(backups_path).resolve()
     if not db_path.is_dir():
@@ -266,6 +421,36 @@ def compact_lancedb(
                 compacted_tables=compacted_tables, rows=rows,
             )
 
+    orphan_index_directories_removed: dict[str, int | None] = {}
+    for name in MAINTENANCE_TABLES:
+        try:
+            table = database.open_table(name)
+            orphan_uuids = _orphan_index_uuids(db_path, name, table)
+            if orphan_uuids is None:
+                orphan_index_directories_removed[name] = None
+                continue
+            index_root = (db_path / f"{name}.lance" / "_indices").resolve()
+            removed = 0
+            for orphan_uuid in sorted(orphan_uuids):
+                target = (index_root / orphan_uuid).resolve()
+                if target.parent != index_root:
+                    raise ValueError(f"unsafe index cleanup target: {target}")
+                if target.is_dir():
+                    shutil.rmtree(target)
+                    removed += 1
+            orphan_index_directories_removed[name] = removed
+        except Exception as error:
+            return _failure(
+                f"cleanup_indices.{name}",
+                f"orphan index cleanup failed for {name}: {error}",
+                started,
+                backup_created=str(backup_created),
+                backups_deleted=backups_deleted,
+                compacted_tables=compacted_tables,
+                orphan_index_directories_removed=orphan_index_directories_removed,
+                rows=rows,
+            )
+
     fts_unindexed = None
     for name in MAINTENANCE_TABLES:
         try:
@@ -277,6 +462,26 @@ def compact_lancedb(
                 "version": readable_version,
                 "version_readable": True,
             })
+            active_uuids = _active_index_uuids(table)
+            if active_uuids is not None:
+                physical_uuids = _physical_index_uuids(db_path, name)
+                missing_active = active_uuids - physical_uuids
+                remaining_orphans = physical_uuids - active_uuids
+                if missing_active or remaining_orphans:
+                    return _failure(
+                        f"verify.{name}.indices",
+                        (
+                            f"index directory verification failed for {name}: "
+                            f"missing_active={sorted(missing_active)}, "
+                            f"remaining_orphans={sorted(remaining_orphans)}"
+                        ),
+                        started,
+                        backup_created=str(backup_created),
+                        backups_deleted=backups_deleted,
+                        compacted_tables=compacted_tables,
+                        orphan_index_directories_removed=orphan_index_directories_removed,
+                        rows=rows,
+                    )
             if after != rows[name]["before"]:
                 return _failure(
                     f"verify.{name}.rows",
@@ -318,9 +523,10 @@ def compact_lancedb(
         "backups_deleted": backups_deleted,
         "rows": rows,
         "compacted_tables": compacted_tables,
+        "orphan_index_directories_removed": orphan_index_directories_removed,
         "fts_num_unindexed_rows": fts_unindexed,
         "manual_concurrency_limit": (
-            "Writes from another process are not blocked; schedule a manual write pause."
+            "Cooperating store writers are locked; pause raw external writers."
         ),
     }
 
@@ -351,7 +557,14 @@ def collect_health_diagnostics(
     selected = [name for name in table_names if name in available]
     tables: dict[str, dict[str, Any]] = {}
     useful_bytes = 0
-    fts = {"state": "missing", "num_indexed_rows": 0, "num_unindexed_rows": None}
+    fts = {
+        "state": "missing",
+        "num_indexed_rows": 0,
+        "num_unindexed_rows": None,
+        "active_index_directories": None,
+        "physical_index_directories": 0,
+        "orphan_index_directories": None,
+    }
 
     for name in selected:
         try:
@@ -370,13 +583,36 @@ def collect_health_diagnostics(
             }
             if name == "memories":
                 fts_stats = _fts_index_stats(table)
+                active_uuids = _active_index_uuids(table)
+                physical_uuids = _physical_index_uuids(db_path, name)
+                orphan_uuids = (
+                    None if active_uuids is None else physical_uuids - active_uuids
+                )
                 if fts_stats is None:
-                    fts = {"state": "missing", "num_indexed_rows": 0, "num_unindexed_rows": None}
+                    fts = {
+                        "state": "missing",
+                        "num_indexed_rows": 0,
+                        "num_unindexed_rows": None,
+                        "active_index_directories": (
+                            None if active_uuids is None else len(active_uuids)
+                        ),
+                        "physical_index_directories": len(physical_uuids),
+                        "orphan_index_directories": (
+                            None if orphan_uuids is None else len(orphan_uuids)
+                        ),
+                    }
                 else:
                     fts = {
                         "state": "current" if fts_stats["num_unindexed_rows"] == 0 else "lagging",
                         "num_indexed_rows": fts_stats["num_indexed_rows"],
                         "num_unindexed_rows": fts_stats["num_unindexed_rows"],
+                        "active_index_directories": (
+                            None if active_uuids is None else len(active_uuids)
+                        ),
+                        "physical_index_directories": len(physical_uuids),
+                        "orphan_index_directories": (
+                            None if orphan_uuids is None else len(orphan_uuids)
+                        ),
                     }
         except Exception as error:
             tables[name] = {"state": "error", "error": str(error)[:300]}

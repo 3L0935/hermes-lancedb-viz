@@ -97,24 +97,25 @@ def migrate(db_path: Path, apply: bool = False) -> dict:
         return result
 
     store = LanceDBStore(db_path)
-    edge_table = store._ensure_edges_table()
-    for row in planned:
-        source_id = str(row.get("source_id") or "")
-        if row["resolution"] == "orphaned_source":
-            edge_table.delete(f"source_id = {_sql(source_id)}")
-            continue
-        relation_type = str(row.get("relation_type") or "")
-        target_label = str(row.get("target_label") or "")
-        where = (
-            f"source_id = {_sql(source_id)} AND "
-            f"relation_type = {_sql(relation_type)} AND "
-            f"target_label = {_sql(target_label)}"
-        )
-        edge_table.update(where, {"target_id": row["target_id"]})
+    with store.write_batch():
+        edge_table = store._ensure_edges_table()
+        for row in planned:
+            source_id = str(row.get("source_id") or "")
+            if row["resolution"] == "orphaned_source":
+                edge_table.delete(f"source_id = {_sql(source_id)}")
+                continue
+            relation_type = str(row.get("relation_type") or "")
+            target_label = str(row.get("target_label") or "")
+            where = (
+                f"source_id = {_sql(source_id)} AND "
+                f"relation_type = {_sql(relation_type)} AND "
+                f"target_label = {_sql(target_label)}"
+            )
+            edge_table.update(where, {"target_id": row["target_id"]})
 
-    conflict_count = 0
-    for memory in memories:
-        conflict_count += len(store.detect_conflicts_for(str(memory["id"])))
+        conflict_count = 0
+        for memory in memories:
+            conflict_count += len(store.detect_conflicts_for(str(memory["id"])))
     result["conflicts_created_or_reopened"] = conflict_count
     return result
 

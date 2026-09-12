@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 from collections import deque
+from contextlib import contextmanager
+import fcntl
 from functools import wraps
 import logging
 import os
@@ -66,10 +68,10 @@ def _mutation_lock_for(db_path: Path) -> threading.RLock:
 
 
 def _serialized_mutation(method):
-    """Serialize one process's mutations for a resolved LanceDB path."""
+    """Serialize and batch one public mutation for a resolved LanceDB path."""
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        with self._mutation_lock:
+        with self.write_batch():
             return method(self, *args, **kwargs)
     return wrapped
 
@@ -517,6 +519,7 @@ class LanceDBStore:
         self._path = Path(db_path)
         self._path.mkdir(parents=True, exist_ok=True)
         self._mutation_lock = _mutation_lock_for(self._path)
+        self._mutation_depth = 0
         self._db = lancedb.connect(str(self._path))
         self._table_name = "memories"
         self._table: "lancedb.table.LanceTable" = self._init_table()
@@ -560,17 +563,14 @@ class LanceDBStore:
         try:
             tbl = self._db.open_table(self._table_name)
             if "tags" in tbl.schema.names:
-                self._ensure_fts_index(tbl)
                 return tbl
             logger.warning("Table has old schema — missing tags/quality/type")
             return tbl
         except Exception:
-            tbl = self._db.create_table(self._table_name, schema=self._get_schema())
-            self._ensure_fts_index(tbl)
-            return tbl
+            return self._db.create_table(self._table_name, schema=self._get_schema())
 
     def _ensure_fts_index(self, tbl):
-        """Create or refresh the content FTS index only when rows are missing."""
+        """Create or refresh content FTS explicitly on the writer path."""
         try:
             row_count = tbl.count_rows()
             for index in tbl.list_indices():
@@ -581,15 +581,59 @@ class LanceDBStore:
                     and index.num_unindexed_rows == 0
                 ):
                     logger.info("FTS index already current on content column")
-                    return
+                    return True
             try:
                 from lancedb.index import FTS
                 tbl.create_index("content", config=FTS(), replace=True)
             except (ImportError, TypeError, AttributeError):
                 tbl.create_fts_index("content", replace=True)
             logger.info("FTS index ready on content column")
+            return True
         except Exception as e:
-            logger.debug("FTS index creation skipped: %s", e)
+            logger.warning("FTS index refresh failed after memory write: %s", e)
+            return False
+
+    def refresh_fts_index(self) -> bool:
+        """Explicitly refresh content FTS as one cooperating writer operation."""
+        with self.write_batch():
+            return self._ensure_fts_index(self._table)
+
+    @property
+    def mutation_lock_path(self) -> Path:
+        """Advisory lock shared by cooperating writers and maintenance."""
+        return self._path / ".write.lock"
+
+    @contextmanager
+    def write_batch(self):
+        """Serialize a writer batch and refresh FTS once after memory changes.
+
+        Nested public mutations share the outer batch. The table version is the
+        source of truth, so conflict-only operations do not rebuild the memories
+        index and partial commits still receive a refresh before their exception
+        is propagated.
+        """
+        with self._mutation_lock:
+            outermost = self._mutation_depth == 0
+            lock_file = None
+            start_version = None
+            if outermost:
+                lock_file = self.mutation_lock_path.open("a+")
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                self._fresh()
+                start_version = int(self._table.version)
+            self._mutation_depth += 1
+            try:
+                yield self._table
+            finally:
+                self._mutation_depth -= 1
+                if outermost:
+                    try:
+                        self._table.checkout_latest()
+                        if int(self._table.version) != start_version:
+                            self._ensure_fts_index(self._table)
+                    finally:
+                        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                        lock_file.close()
 
     def _compute_db_size(self) -> int:
         try:

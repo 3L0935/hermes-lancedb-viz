@@ -1,7 +1,7 @@
 ---
 name: lancedb-memory-system
 description: "Architecture LanceDB locale — store, viz, scripts. Pas de format ici (voir memory-writing)."
-version: 5.1.0
+version: 5.2.0
 triggers:
   - "lancedb memory"
   - "vector memory"
@@ -23,6 +23,7 @@ Architecture et déploiement du stockage vectoriel local.
 ~/.hermes/lancedb/                              <- DB files (donnees persistantes)
 ~/.hermes/lancedb-viz/                          <- viz server.py + static/ (deploy par deploy-local.sh)
 ~/.config/systemd/user/lancedb-viz.service      <- unit systemd (versionnee dans le repo)
+~/.config/systemd/user/lancedb-viz-maintenance.timer <- seuils de compaction, toutes les heures
 ```
 
 **Viz** : le conteneur Docker `lancedb-viz` sur `127.0.0.1:7777` est canonique (décision du 10/09/2026). Il est piloté par `~/github/hermes-hub/services/lancedb-viz/docker-compose.yaml`, utilise l'image `lancedb-viz:local` et le réseau externe `hub-services`. L'unité systemd sur 7778 est un secours désactivé.
@@ -270,11 +271,16 @@ contrôle lexical gelé ; le delta du baseline vivant reste informatif. Les
 cibles, le bruit mesuré, leur coût et l'engine sont dans
 `audit/repro/retrieval-baseline-reference.json`.
 
-La maintenance est manuelle : `GET /api/maintenance/compact/plan` ne modifie
-rien ; `POST /api/maintenance/compact` exige `{"confirmed": true}`. L'apply
-publie atomiquement un backup `lancedb-pre-compact-*` avant la compaction,
-retient les deux derniers backups gérés et vérifie chaque table. Un échec expose
-`failed_step` et, si créé, `backup_created` pour le recovery.
+`GET /api/maintenance/compact/plan` est strictement read-only et expose les
+seuils (`64` versions, `64` fragments, `4` dossiers d'index orphelins),
+`recommended` et les raisons exactes. Le timer user
+`lancedb-viz-maintenance.timer` consulte ce plan chaque heure et appelle le POST
+confirmé uniquement lorsqu'un seuil est dépassé. L'apply publie atomiquement un
+backup `lancedb-pre-compact-*` avant toute compaction ou suppression, retient les
+deux derniers backups gérés, compacte les quatre tables, supprime seulement les
+UUID d'index absents des métadonnées Lance courantes, puis vérifie chaque table.
+Un échec expose `failed_step` et, si créé, `backup_created` pour le recovery ; il
+n'y a jamais de restauration automatique.
 
 ## lancedb_update tool (2026-06-22)
 
@@ -295,7 +301,7 @@ Nouvel outil MCP exposé au plugin : `lancedb_update`. Permet d'éditer une mém
 ### API LanceDB 0.34.0
 
 ```python
-tbl.create_fts_index("content", replace=True)              # Idempotent, auto dans _init_table()
+store._ensure_fts_index(tbl)  # writer explicite, une fois en fin de batch
 
 # Hybrid query (vector + BM25 fusion RRF)
 tbl.search(query_type='hybrid').text(query).vector(vec).limit(top_k).where(...)
@@ -303,9 +309,20 @@ tbl.search(query_type='hybrid').text(query).vector(vec).limit(top_k).where(...)
 
 ### Ce qui a été patché
 
-**`_init_table()`** : appelle `_ensure_fts_index(tbl)` après ouverture ou création de la table — crée l'index BM25 sur la colonne `content` avec `replace=True` (idempotent).
+**`_init_table()`** : ouvre/crée la table mais ne touche jamais l'index FTS. Un
+reopen, un search ou une lecture du viz ne doit créer ni version, ni fragment,
+ni dossier `_indices`.
 
-**`_ensure_fts_index(tbl)`** : méthode dédiée, try/except silencieux si FTS non supporté (fallback vector-only).
+**`write_batch()` / `_serialized_mutation`** : le writer prend le verrou
+inter-processus, regroupe les mutations imbriquées et appelle
+`_ensure_fts_index(tbl)` une seule fois à la fin si la version de `memories` a
+changé. Les scripts qui écrivent directement dans la table doivent entourer le
+batch avec `store.write_batch()` ; ne jamais reconstruire dans un reader.
+
+LanceDB 0.34.0 inclut les fragments non encore indexés dans une recherche FTS,
+ce qui préserve le rappel pendant le batch. Mesure synthétique : une ligne
+nouvelle est retrouvée avant et après le refresh ; le test de régression garde
+ce contrat explicite au lieu de le supposer.
 
 **`search()`** : utilise `query_type='hybrid'` avec `.text(query).vector(vector)`. Fusion RRF entre BM25 et cosine similarity. Score exposé via `_relevance_score` (champ LanceDB hybride) avec fallback `_distance`.
 
@@ -494,13 +511,13 @@ La fonction `_build_category_hub_graph()` dans `server.py` groupait les nodes pa
 
 **Fix :** Grouper par `n.get("category", "fact")`, pas par `label.split(":")[0]`. Les hubs deviennent `◆ Tech` (orange), `◆ Correction` (rouge), `◆ Fact` (cyan), `◆ Project` (vert), `◆ Pattern` (orange foncé). La couleur du hub correspond à la palette de catégorie. Voir `_build_category_hub_graph()` dans server.py.
 
-### Pitfall: `store.delete()` is extremely slow (30-90s per call)
+### Pitfall: `store.delete()` is extremely slow (110-200s per call at 460+ rows)
 
-Each `store.delete(memory_id)` triggers a full link rebuild across ALL entries — it re-scans every memory to recompute entity links. With 230+ entries, a single delete takes 30-90 seconds.
+Each `store.delete(memory_id)` triggers a full link rebuild across ALL entries — it re-scans every memory to recompute entity links. The cost scales with the row count: 30-90s at 230 rows, **108-195s measured at 463 rows (12/09/2026)**.
 
-**Symptôme :** Batch deletes in a loop timeout. `terminal` calls with `timeout=30` hang. Even `timeout=120` may not be enough for multiple deletes.
+**Symptôme :** Batch deletes in a loop timeout. `terminal` calls with `timeout=120` hang. For 10+ deletes, even a 420s foreground call is not enough — a 14-delete batch needs ~35 minutes total.
 
-**Fix :** Run each delete as a **separate `terminal` call** with `timeout=90` minimum:
+**Fix :** Never delete in a session loop. Write the delete list to a file and run the whole batch as a **background** process (`nohup ... &`, one delete per iteration, `flush=True` on each print), then poll the log. A per-delete `terminal` call is only viable for 1-3 deletes with `timeout=300` minimum:
 ```python
 # ONE delete per Python invocation:
 cd ~/.hermes/hermes-agent && timeout 90 venv/bin/python3 -c "
@@ -511,54 +528,53 @@ store.delete('UUID-HERE')
 print('deleted')
 "
 ```
-For 5+ deletes, expect 5+ separate terminal calls. Do NOT attempt to batch them in one process — the second delete will hang indefinitely.
+**Do NOT attempt to batch them in one foreground process.** Foreground batches hit the tool timeout mid-loop; the work continues only if the process is detached (`nohup`, background=true), and results must be read back from a log file.
 
-**Prévention :** Design cron jobs and cleanup scripts to avoid frequent deletes. Prefer `store._table.update()` for in-place fixes (fast, no link rebuild). Only use `delete` for actual removal of obsolete/duplicate entries.
+**Dedupe triage (measured 12/09/2026, 463 rows):** vector similarity alone is NOT proof of a duplicate. At threshold 0.92 there were 8 groups and at 0.88 there were 24, but most groups were the same *template* with different subjects (same `Domaine:Sujet` shape, different content). Read every pair before deleting. Safe procedure: enrich the keeper first (`update_memory` with the union of the facts, or `add_memory` + delete when the keeper's content is legacy and the contract refuses the patch), then delete the loser, then re-embed both sides. `update_memory` REJECTS a patch on a row whose stored content has no `Domain:Subject` prefix (`legacy content must start with Domain:Subject`) — for those rows, create a fresh entry via `add_memory` and delete the legacy one instead of trying to repair it in place.
 
-### Pitfall: Version bloat — `cleanup_old_versions()` déprécié, utiliser `tbl.optimize(cleanup_older_than=...)` (LanceDB 0.21+)
+**Prévention :** Design cron jobs and cleanup scripts to avoid frequent deletes.
+Pour un update raw indispensable, utiliser `with store.write_batch():` afin de
+prendre le verrou partagé et de rafraîchir le FTS une seule fois. Only use
+`delete` for actual removal of obsolete/duplicate entries.
+
+### Pitfall: Version bloat et index FTS remplacés
 
 **Mise à jour 2026-07-05 :** `cleanup_old_versions()` est déprécié depuis LanceDB 0.21.0. Remplacé par `Table.optimize()` mais **attention : `tbl.optimize()` sans argument est un no-op pour le cleanup de versions** — il ne fait que réécrire les fichiers de données. Pour purger les vieilles versions, il faut explicitement `cleanup_older_than=timedelta(seconds=0)`.
 
-**Fix actuel (LanceDB ≥0.21) :**
-```bash
-# One-time: install pylance if not present
-cd ~/.hermes/hermes-agent && venv/bin/pip install pylance
-```
-```python
-import lancedb
-from datetime import timedelta
-db = lancedb.connect('/home/elo/.hermes/lancedb')
-tbl = db.open_table('memories')
-tbl.optimize(cleanup_older_than=timedelta(seconds=0))  # purge toutes les vieilles versions
-```
-→ 96M → **7.2M** (testé sur 1171→2 versions, 333 entrées). `optimize()` sans `cleanup_older_than` ne réduit PAS la taille — c'est le paramètre qui fait le vrai cleanup.
+**Cause supplémentaire vérifiée 12/09/2026 :** chaque
+`create_index(..., replace=True)` crée un nouvel UUID sous `_indices` sans
+effacer le précédent. `optimize(cleanup_older_than=0)` compacte versions et
+fragments mais crée lui-même un nouvel index et ne retire pas ces UUID abandonnés.
 
 **Signature complète :** `tbl.optimize(*, cleanup_older_than: Optional[timedelta] = None, delete_unverified: bool = False, retrain: bool = False)`. Sans `cleanup_older_than`, les versions s'accumulent indéfiniment.
 
 **Legacy (LanceDB <0.21) :** `tbl.cleanup_old_versions(timedelta(seconds=0))` — nécessite pylance. `tbl.optimize()` n'existait pas encore.
 
-### Pitfall: LanceDB version bloat après batch-writes
+### Maintenance sûre après batch-writes
 
-LanceDB garde **toutes les versions** de la table à chaque écriture. 127 reclassifications + 38 corrections de format + les updates précédents = **12,479 versions** → 382 MB de manifests.
+LanceDB garde une version de table à chaque écriture. Mesure du 12/09/2026 avant
+compaction : **15 311 versions**, 15 308 fragments et 131 dossiers FTS pour 463
+lignes. Le process responsable du volume exact n'est pas identifié ; ne pas
+l'attribuer au cron observé sans nouvelle preuve processus.
 
 **Symptôme :** `du -sh ~/.hermes/lancedb/memories.lance/` montre 400-600 MB pour seulement ~300 entrées. Le dossier `_versions/` fait la majorité.
 
-**Fix (pylance requis) :**
+**Fix actuel :** ne jamais lancer un `optimize()` ou supprimer `_indices` à la
+main. Utiliser le plan et la route backup-first :
+
 ```bash
-# One-time: install pylance if not present
-cd ~/.hermes/hermes-agent && venv/bin/pip install pylance
+curl -fsS http://127.0.0.1:7777/api/maintenance/compact/plan | python3 -m json.tool
+curl -fsS -X POST -H 'Content-Type: application/json' \
+  --data '{"confirmed":true}' http://127.0.0.1:7777/api/maintenance/compact \
+  | python3 -m json.tool
 ```
-```python
-import lancedb
-db = lancedb.connect('/home/elo/.hermes/lancedb')
-tbl = db.open_table('memories')
-tbl.optimize()  # LanceDB ≥0.21
-```
-→ 191M → **11M** en une commande (testé 2026-07-02: 3615→1 version, 324 entrées intactes). Les données sont préservées.
 
-**Sans pylance :** `tbl.optimize()` ne fonctionne pas — pylance est requis pour l'optimisation des versions.
-
-**Prévention :** Lancer `tbl.optimize()` après un batch > 50 updates/reclassifications. Pas besoin de le faire à chaque write.
+Le timer versionné automatise exactement cette décision. Le store et la route
+partagent `~/.hermes/lancedb/.write.lock`, donc les writers coopérants attendent
+pendant la compaction. Tout writer raw qui n'utilise pas `store.write_batch()`
+doit être arrêté manuellement. La suppression d'orphelins est sautée et
+rapportée `None` si l'API ne permet pas d'obtenir les UUID actifs : aucun chiffre
+ni dossier n'est deviné.
 
 ### Pitfall: Entree sans [Tier=N] — jamais filtrable, jamais visible correctement
 

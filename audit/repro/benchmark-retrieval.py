@@ -114,10 +114,16 @@ def copy_read_only_fixture(
                 f"source table {table_name} changed during copy: "
                 f"{version_before} -> {latest_version}"
             )
+    from plugin.store import LanceDBStore
+
+    fixture_store = LanceDBStore(fixture_path)
+    if not fixture_store.refresh_fts_index():
+        raise RuntimeError("temporary fixture FTS refresh failed")
     return {
         "fixture_path": str(fixture_path),
         "source_versions": versions,
         "rows_by_table": rows,
+        "fts_refreshed_by_fixture_writer": True,
     }
 
 

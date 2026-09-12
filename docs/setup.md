@@ -159,9 +159,17 @@ versions, and row counts.
 
 ## 7. Maintenance and compaction
 
-`GET /api/maintenance/compact/plan` is read-only. The confirmed POST creates an
-atomically published backup before compaction, retains two managed backups, and
-verifies every table afterward. Run it only during a write pause:
+`LanceDBStore` does not refresh FTS while opening or reading. Writers refresh it
+once at the end of the outer mutation; raw scripts must wrap their writes in
+`store.write_batch()`.
+
+`GET /api/maintenance/compact/plan` is read-only. It recommends maintenance
+above 64 versions, 64 fragments, or 4 orphan index UUID directories. The
+deployed persistent systemd user timer checks this plan hourly and calls the
+confirmed route only above a threshold. The POST creates an atomically
+published backup before compaction or index cleanup, retains two managed
+backups, removes only UUIDs not referenced by current Lance metadata, and
+verifies every table afterward:
 
 ```bash
 curl -fsS http://127.0.0.1:7777/api/maintenance/compact/plan \
@@ -174,7 +182,9 @@ curl -fsS -X POST \
 ```
 
 Failures report `failed_step`. If backup creation completed, the response also
-keeps `backup_created` available for recovery.
+keeps `backup_created` available for recovery; no automatic restore is
+attempted. Cooperating store writers use the same advisory lock. Pause any raw
+external writer that does not use the batch API.
 
 ## 8. Contradiction behavior
 

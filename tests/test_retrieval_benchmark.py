@@ -153,6 +153,11 @@ class RetrievalBenchmarkTests(unittest.TestCase):
             self.assertEqual(source_version, report["source_versions"]["memories"])
             copied = lancedb.connect(str(fixture_path)).open_table("memories")
             self.assertEqual(1, copied.count_rows())
+            self.assertTrue(report["fts_refreshed_by_fixture_writer"])
+            self.assertEqual(
+                ["FTS"],
+                [index.index_type for index in copied.list_indices()],
+            )
             with self.assertRaises(ValueError):
                 benchmark.copy_read_only_fixture(source_path, ROOT / "forbidden-fixture")
 
