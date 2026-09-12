@@ -288,23 +288,58 @@ routed locally without an LLM call.
 
 ## Visualizer
 
-Lightweight web UI with 10 pages:
+Lightweight web UI with 11 pages. Screenshots below are of a synthetic fixture
+(`docs/screenshots/`, 15 invented memories), never of a real database.
+
+### Dashboard
+![Dashboard](docs/screenshots/01-dashboard.png)
+
+### Graph
+The graph opens on the **whole corpus**, drawing embedding-similarity edges only.
+
+![Graph, whole corpus](docs/screenshots/10-graph-full.png)
+
+Selecting a memory does not reload the graph: the sidebar opens over it and the node and
+its neighbours glow. Escape, the close button or a click on empty canvas clears it.
+
+![Graph with a memory selected](docs/screenshots/11-graph-selected.png)
+
+Grouping is switchable: by category hubs, by entity hubs, or the raw embedding view.
+
+![Graph grouped by category hubs](docs/screenshots/12-graph-hubs.png)
+
+### Embeddings
+UMAP projection of every memory vector, plus a read-only local health inspection.
+
+![Embeddings and local health](docs/screenshots/07-embedding-health.png)
+
+### Other pages
+| Memories | Timeline | Tags |
+|---|---|---|
+| ![Memories](docs/screenshots/02-memories.png) | ![Timeline](docs/screenshots/03-timeline.png) | ![Tags](docs/screenshots/04-tags.png) |
+
+| Conflicts | Review | Clusters | Stale |
+|---|---|---|---|
+| ![Conflicts](docs/screenshots/05-conflicts.png) | ![Review](docs/screenshots/06-review.png) | ![Clusters](docs/screenshots/08-clusters.png) | ![Stale](docs/screenshots/09-stale.png) |
+
+Page list:
 
 - **Dashboard** — total memories, category breakdown, tier distribution, top accessed
 - **Memories** — paginated list (20/page) with filters (category, type, tag, quality, date, search)
 - **Timeline** — memories grouped by day
 - **Tags** — all tags with counts, rename/merge/delete operations
 - **Duplicates** — near-duplicate groups by cosine similarity (threshold slider)
-- **Conflicts** - explicit same-subject claim contradictions, with open/resolved filtering
+- **Conflicts** — explicit same-subject claim contradictions, with open/resolved filtering
+- **Review** — bounded read-only consistency inbox
 - **Embeddings** — UMAP 2D projection of all memory vectors
 - **Clusters** — semantic clusters (threshold + min size controls)
 - **Stale** — old + low-quality memories (cleanup candidates)
-- **Graph** — vis-network entity graph with freshness halo, tier filtering, typed edges
+- **Graph** — whole corpus by default, embedding links, optional typed-relation overlay, hub grouping, freshness halo, tier filtering
 
 ### API endpoints
 
 ```
-GET  /api/graph                         — bounded neighborhood (`memory_id`, `threshold`, `relation_types`)
+GET  /api/graph                         — whole corpus by default (`threshold`, `cluster`, `show_declared`); `memory_id` selects one memory
 GET  /api/stats                         — raw statistics
 GET  /api/typed-edges                   — all persisted typed edges
 GET  /api/search                        — routed search (`q`, `top_k`, `diagnostics`)

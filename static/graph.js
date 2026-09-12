@@ -103,6 +103,10 @@ async function loadGraph() {
       if (allData.nodes?.some(node => node.id === selectedNodeId)) highlightTypedRelations(selectedNodeId);
       else selectedNodeId = null;
     }
+    // A rebuilt graph is a new set of nodes: keep the previous zoom and it looks cropped
+    // at the centre. Re-fit so the whole corpus is framed, unless a memory is selected
+    // and the user is zoomed in on purpose.
+    if (!selectedNodeId) fitGraph();
   } catch (e) {
     console.error('Failed to load graph:', e);
     document.getElementById('loading').innerHTML = 'Load error. Check server.';
@@ -617,6 +621,9 @@ function closeSidebar() {
   resetTypedHighlights();
   document.getElementById('sidebar').classList.remove('open');
   if (network) network.unselectAll();
+  // Selecting a memory zooms in on it; leaving the selection must give the whole graph
+  // back, or the view stays cropped on a memory nobody is looking at any more.
+  fitGraph();
   // No applyFilters() here: clicking empty space fires this on every stray click, and
   // the filter state has not changed. Restoring the ~25 glowing nodes already redraws
   // what needs redrawing.
@@ -624,6 +631,15 @@ function closeSidebar() {
 
 function focusNode(nodeId) {
   if (network) network.focus(nodeId, { scale: 1.5, animation: { duration: 400, easingFunction: 'easeInOutQuad' } });
+}
+
+// Return to a view of the whole graph. Selecting a memory zooms in on it, and switching
+// mode or clearing the selection used to keep that zoom, so the corpus looked cropped.
+function fitGraph(animate = true) {
+  if (!network) return;
+  network.fit({
+    animation: animate ? { duration: 450, easingFunction: 'easeInOutQuad' } : false,
+  });
 }
 
 function searchEntity(entity) {

@@ -57,7 +57,14 @@ run install -m 0644 "$ROOT/server/server.py" "$VIZ/server.py"
 # server.py imports maintenance.py (health diagnostics + manual compaction);
 # without it the deployed viz fails to import and serves no new routes.
 run install -m 0644 "$ROOT/server/maintenance.py" "$VIZ/maintenance.py"
+# The Review page loads audit-memory-format.py at runtime. Shipping only
+# compact-if-needed.py left /api/review failing with "No such file or directory"
+# in production, so every script server.py can load is deployed.
+# memory_contract.py goes beside it because the script imports the contract, and the
+# deployed viz directory has no plugin/ subdirectory to fall back on.
 run install -m 0755 "$ROOT/scripts/compact-if-needed.py" "$VIZ/scripts/compact-if-needed.py"
+run install -m 0755 "$ROOT/scripts/audit-memory-format.py" "$VIZ/scripts/audit-memory-format.py"
+run install -m 0644 "$ROOT/plugin/memory_contract.py" "$VIZ/scripts/memory_contract.py"
 for file in "$ROOT"/static/*; do
   run install -m 0644 "$file" "$VIZ/static/$(basename "$file")"
 done
