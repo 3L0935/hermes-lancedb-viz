@@ -40,6 +40,8 @@ class DeployContractTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:7777", script)
         self.assertIn("LANCEDB_VIZ_MODE", script)
         self.assertIn('if [[ "$VIZ_MODE" == "systemd" ]]', script)
+        self.assertIn("$BASE_URL/api/typed-edges", script)
+        self.assertNotIn("$BASE_URL/api/graph?cluster=raw", script)
 
 
 if __name__ == "__main__":

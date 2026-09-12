@@ -34,7 +34,7 @@ check "HTTP 200 on /" sh -c "curl -sfo /dev/null -w '%{http_code}' '$BASE_URL/' 
 check "stats contains memories" sh -c "curl -fsS '$BASE_URL/api/stats' | python3 -c 'import json,sys; assert json.load(sys.stdin).get(\"total_memories\", 0) > 0'"
 check "dashboard returns JSON" sh -c "curl -fsS '$BASE_URL/api/dashboard' | python3 -c 'import json,sys; json.load(sys.stdin)'"
 check "conflicts returns an array" sh -c "curl -fsS '$BASE_URL/api/conflicts?status=open' | python3 -c 'import json,sys; assert isinstance(json.load(sys.stdin), list)'"
-check "graph typed edges have IDs" sh -c "curl -fsS '$BASE_URL/api/graph?cluster=raw&threshold=0.8' | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d.get(\"nodes\"); assert all(e.get(\"from\") and e.get(\"to\") for e in d.get(\"typed_edges\", []))'"
+check "typed edges have IDs" sh -c "curl -fsS '$BASE_URL/api/typed-edges' | python3 -c 'import json,sys; edges=json.load(sys.stdin).get(\"edges\", []); assert isinstance(edges, list); assert all(e.get(\"from\") and e.get(\"to\") for e in edges)'"
 check "static app.js served" curl -fsS -o /dev/null "$BASE_URL/static/app.js"
 check "static graph.js served" curl -fsS -o /dev/null "$BASE_URL/static/graph.js"
 check "canonical plugin synced" diff -q "$ROOT/plugin/store.py" "$HERMES_HOME/plugins/lancedb/store.py"

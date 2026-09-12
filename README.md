@@ -58,7 +58,7 @@ model call and no service.
 - **Hermes Agent** installed and running
 - **Ollama** running on localhost:11434
 - **nomic-embed-text** model pulled: `ollama pull nomic-embed-text`
-- **Python 3.11+** with `lancedb`, `pyarrow`, `httpx`, `numpy`
+- **Python 3.11+** with `lancedb==0.34.0`, `pyarrow`, `httpx`, `numpy`
 - **Docker** for the primary visualizer deployment
 - **systemd user services** only for the optional fallback deployment
 
@@ -81,9 +81,14 @@ cp plugin/{store.py,memory_contract.py,__init__.py,plugin.yaml} \
 cp plugin/{store.py,memory_contract.py,__init__.py,plugin.yaml} \
   ~/.hermes/hermes-agent/plugins/memory/lancedb/
 
-cd ~/.hermes/hermes-agent
-venv/bin/pip install lancedb pyarrow httpx numpy
+"$HOME/.hermes/hermes-agent/venv/bin/pip" install -r requirements.txt
 ```
+
+Do not replace the requirements install with an unpinned `pip install lancedb`.
+The BM25 score is produced by the retrieval engine, not by this repository
+alone: identical rows and code scored differently under LanceDB 0.34.0 and
+0.38.0. The abstention threshold is calibrated for the pinned
+`lancedb==0.34.0` engine.
 
 ### 3. Configure Hermes
 
@@ -106,17 +111,29 @@ hermes tools | grep lancedb
 
 ### 4. Deploy the visualizer
 
-The primary UI is the `lancedb-viz` Docker container on port 7777.
-`deploy-local.sh` synchronizes repository files into both plugin locations and
-the visualizer directory, then restarts that container. Use
-`--systemd-fallback` to target the optional service on port 7778 instead.
+The canonical UI is the `lancedb-viz` Docker container on `127.0.0.1:7777`,
+managed by the Hermes Hub Compose service. Start or recreate it from the Hub,
+then synchronize this repository. Because `deploy-local.sh` rewrites both
+plugin copies but does not restart `hermes-gateway`, restart the gateway after
+deploying plugin changes; otherwise its Python process keeps the previously
+imported module while the container serves the new code.
 
 ```bash
+cd "$HOME/github/hermes-hub/services/lancedb-viz"
+docker compose up -d
+
+cd "$HOME/github/hermes-lancedb-viz"
 ./scripts/deploy-local.sh --dry-run
 ./scripts/deploy-local.sh
+systemctl --user restart hermes-gateway
+./scripts/verify-setup.sh
 ```
 
 Dashboard: `http://localhost:7777`
+
+The disabled systemd user unit on port 7778 is a recovery fallback, not an
+equivalent deployment path. Use `./scripts/deploy-local.sh --systemd-fallback`
+only when deliberately recovering without the canonical Docker service.
 
 For the full setup guide, see [docs/setup.md](docs/setup.md).
 
@@ -256,7 +273,18 @@ A noise filter (~140+ words) blocks generic FR/EN words.
 
 ### Hybrid search
 
-LanceDB native hybrid retrieval combines BM25 (Tantivy FTS) and vector cosine through Reciprocal Rank Fusion. A precision gate filters obvious low-score noise. Exact and relationship-shaped queries are routed locally without an LLM call.
+LanceDB native hybrid retrieval combines BM25 (Tantivy FTS) and vector cosine
+through Reciprocal Rank Fusion. It abstains with no result when every candidate
+is below both calibrated evidence thresholds:
+
+- `SEARCH_MIN_BM25_SCORE = 12.80`
+- `SEARCH_MAX_COSINE_DISTANCE = 0.30`
+
+A candidate is retained when its BM25 score is at least 12.80 or its cosine
+distance is at most 0.30. The BM25 threshold is specific to
+`lancedb==0.34.0`; changing the engine invalidates that calibration even when
+the code and corpus are identical. Exact and relationship-shaped queries are
+routed locally without an LLM call.
 
 ## Visualizer
 
@@ -276,26 +304,84 @@ Lightweight web UI with 10 pages:
 ### API endpoints
 
 ```
-GET  /api/dashboard          — enriched stats
-GET  /api/memories           — paginated + filtered list
-GET  /api/tags               — all tags with counts
-GET  /api/timeline           — memories by day
-GET  /api/duplicates         — duplicate groups (threshold param)
-GET  /api/projection         — UMAP 2D projection
-GET  /api/clusters           — semantic clusters
-GET  /api/stale              — stale memories
-GET  /api/conflicts          - contradiction ledger (`status`, `memory_id`, `limit`)
-GET  /api/graph              — full graph (nodes + edges + typed_edges)
-GET  /api/stats              — raw stats
-POST /api/memories/:id       — update memory
-POST /api/memories/:id/access — increment access count
-POST /api/memories/bulk-delete
-POST /api/memories/bulk-tag
-POST /api/memories/bulk-type
-POST /api/tags/rename | delete | merge
-GET  /api/refresh            — reset store singleton
-POST /api/export | import
+GET  /api/graph                         — bounded neighborhood (`memory_id`, `threshold`, `relation_types`)
+GET  /api/stats                         — raw statistics
+GET  /api/typed-edges                   — all persisted typed edges
+GET  /api/search                        — routed search (`q`, `top_k`, `diagnostics`)
+GET  /api/export                        — download the memory export
+GET  /api/memory?id=:id                 — legacy memory detail lookup
+GET  /api/memories                      — paginated and filtered list
+GET  /api/memories/:id                  — memory detail lookup
+GET  /api/tags                          — all tags with counts
+GET  /api/timeline                      — memories grouped by day
+GET  /api/duplicates                    — duplicate groups (`threshold`)
+GET  /api/projection                    — UMAP projection (`n_neighbors`, `min_dist`)
+GET  /api/health                        — read-only storage and dependency diagnostics
+GET  /api/maintenance/compact/plan      — read-only compaction and backup plan
+GET  /api/clusters                      — semantic clusters (`threshold`, `min_size`)
+GET  /api/stale                         — stale memories (`days`, `quality_max`)
+GET  /api/conflicts                     — contradiction ledger (`status`, `memory_id`, `limit`)
+GET  /api/review                        — bounded read-only review inbox
+GET  /api/dashboard                     — enriched dashboard statistics
+GET  /api/refresh                       — reset the server store singleton
+POST /api/delete                        — legacy delete (`memory_id` in JSON body)
+POST /api/update                        — legacy memory update
+POST /api/update_entities               — legacy entity update
+POST /api/import                        — import memories
+POST /api/conflicts/:id/resolve          — resolve a conflict with an audit note
+POST /api/memories/bulk-delete           — delete a bounded ID set
+POST /api/memories/bulk-tag              — add or remove tags in bulk
+POST /api/memories/bulk-type             — set memory type in bulk
+POST /api/tags/rename                    — rename one tag
+POST /api/tags/delete                    — remove one tag
+POST /api/tags/merge                     — merge tags
+POST /api/maintenance/compact            — confirmed backup, compaction, and verification
+POST /api/memories/:id                   — contract-validated memory update
+POST /api/memories/:id/access            — increment access count
+POST /api/memories/:id/preview           — validate and render an update without writing
 ```
+
+### Search diagnostics
+
+Opt in with `diagnostics=1` when investigating routing or abstention:
+
+```bash
+curl -fsS --get \
+  --data-urlencode 'q=memory retrieval policy' \
+  --data 'top_k=5' \
+  --data 'diagnostics=1' \
+  http://127.0.0.1:7777/api/search | python3 -m json.tool
+```
+
+The response reports the selected route, abstention reason, timing, result
+match type, cosine distance and BM25 score when available. Its `diagnostics`
+object includes the active thresholds plus `calibrated_engine`,
+`running_engine`, and `matches`. A false `matches` value means the BM25 score
+is not comparable with the calibration and must be investigated before using
+the result as evidence.
+
+### Maintenance and compaction
+
+Compaction is manual. Inspect the read-only plan first, pause external writers,
+then send the explicit confirmation:
+
+```bash
+curl -fsS http://127.0.0.1:7777/api/maintenance/compact/plan \
+  | python3 -m json.tool
+curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  --data '{"confirmed":true}' \
+  http://127.0.0.1:7777/api/maintenance/compact \
+  | python3 -m json.tool
+```
+
+Apply creates an atomic `lancedb-pre-compact-*` backup before touching any
+table, retains the two newest managed backups, compacts all four tables, and
+verifies row counts, readable versions, and the memories FTS index. A failed
+response includes `failed_step`; once backup creation succeeded it also
+includes `backup_created`, which remains available for recovery. The in-server
+lock blocks duplicate compactions only, so it does not replace a write pause
+across other processes.
 
 ## Scripts
 
@@ -303,14 +389,60 @@ POST /api/export | import
 
 Synchronizes the repository into the canonical user plugin, the runtime
 compatibility copy, and the visualizer deployment. It does not restart the
-Hermes gateway. By default it restarts and verifies Docker on port 7777; pass
-`--systemd-fallback` to restart and verify the optional service on port 7778.
+Hermes gateway: Python does not reload the already imported plugin module, so
+always restart `hermes-gateway` after plugin changes. By default the script
+restarts and verifies the existing Docker container on port 7777. The
+`--systemd-fallback` flag targets only the disabled recovery service on 7778.
 
 ```bash
 ./scripts/deploy-local.sh --dry-run
 ./scripts/deploy-local.sh
+systemctl --user restart hermes-gateway
 ./scripts/deploy-local.sh --dry-run --systemd-fallback
 ```
+
+### docker-run.sh
+
+This is a standalone development helper, not the Hub deployment path. It owns
+the same `lancedb-viz` container name and port, so do not run it while the
+Hub-managed service is active. `--rebuild` rebuilds `lancedb-viz:local` before
+starting the standalone container.
+
+### verify-setup.sh
+
+Run the post-deployment smoke checks against the canonical Docker service:
+
+```bash
+./scripts/verify-setup.sh
+```
+
+For deliberate fallback recovery on port 7778, set
+`LANCEDB_VIZ_MODE=systemd`.
+
+### Retrieval retention gate
+
+The deterministic harness copies the live database read-only into a disposable
+fixture below `/tmp`; it never benchmarks by writing the real database. Run it
+with the pinned host environment and record the engine with every measurement:
+
+```bash
+cd "$HOME/github/hermes-lancedb-viz"
+PYTHONPATH="$PWD:$HOME/.hermes/hermes-agent" \
+OLLAMA_HOST=http://127.0.0.1:11434 \
+"$HOME/.hermes/hermes-agent/venv/bin/python" \
+  audit/repro/benchmark-retrieval.py \
+  --prepare-fixture \
+  --replace-fixture \
+  --output /tmp/bench-retrieval.json
+```
+
+The final-split gate requires exact abstention and preservation of every
+`old_critical_correction`. MRR and recall are corpus-dependent, so they only
+guard against collapse toward the frozen lexical control; the same-run hybrid
+delta is reported but never decides promotion. Frozen targets, measured corpus
+noise, cost, and calibrated engine live in
+`audit/repro/retrieval-baseline-reference.json`; each result records engine,
+table versions, and row counts under `corpus_versions`.
 
 ### audit-memory-format.py
 
@@ -380,25 +512,23 @@ Behavior:
 
 ## Docker deployment
 
-Docker on port 7777 is the primary visualizer deployment. The repository also
-ships `systemd/lancedb-viz.service` as an optional local fallback on port 7778.
+The production definition is
+`~/github/hermes-hub/services/lancedb-viz/docker-compose.yaml`. It runs image
+`lancedb-viz:local` as container `lancedb-viz`, publishes only
+`127.0.0.1:7777`, and joins the existing external `hub-services` network. It
+bind-mounts `server.py`, `maintenance.py`, and `static/` from
+`~/.hermes/lancedb-viz/`, the Hermes Agent tree read-only, and the LanceDB data
+plus `~/.hermes/backups/` read-write.
 
-```yaml
-# docker-compose.yml
-services:
-  lancedb-viz:
-    build: .
-    container_name: lancedb-viz
-    ports:
-      - "7777:7777"
-    volumes:
-      - ~/.hermes/lancedb:/home/hermes/.hermes/lancedb:rw
-      - ~/.hermes/hermes-agent:/home/hermes/.hermes/hermes-agent:ro
-      - ./static:/app/static:ro
-      - ./server/server.py:/app/server.py:ro
-    command: python3 server/server.py --port 7777 --host 0.0.0.0
-    restart: unless-stopped
+```bash
+cd "$HOME/github/hermes-hub/services/lancedb-viz"
+docker compose up -d
+docker compose ps
 ```
+
+The repository-level Compose file and `scripts/docker-run.sh` support local
+development; they are not the production service definition. The systemd unit
+on `127.0.0.1:7778` is disabled and reserved for recovery.
 
 ## License
 
