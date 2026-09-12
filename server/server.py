@@ -1502,6 +1502,33 @@ def api_get_conflicts(params: dict) -> list:
         return {"error": str(e)}
 
 
+def _audit_script_path() -> Path | None:
+    """Locate the read-only audit script, or None if this deployment lacks it.
+
+    The script lives in the repository's scripts/ directory. Only server.py,
+    maintenance.py and static/ are mounted into the container, so scripts/ is absent
+    there unless it is explicitly shipped. The previous version fell back to a
+    candidate path whether or not it existed, so the import failed with a bare
+    "[Errno 2] No such file or directory" naming a path that was never going to exist.
+    """
+    server_dir = Path(__file__).resolve().parent
+    candidates = (
+        server_dir / "scripts" / "audit-memory-format.py",
+        server_dir.parent / "scripts" / "audit-memory-format.py",
+        Path(__file__).resolve().parent.parent / "scripts" / "audit-memory-format.py",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    # Last resort: the canonical source tree, when running outside the container.
+    env_home = os.environ.get("HERMES_HOME")
+    if env_home:
+        fallback = Path(env_home).parent / "github" / "hermes-lancedb-viz" / "scripts" / "audit-memory-format.py"
+        if fallback.is_file():
+            return fallback
+    return None
+
+
 def _audit_module():
     """Load the existing read-only audit implementation from the repository."""
     import importlib.util
@@ -1509,12 +1536,12 @@ def _audit_module():
     name = "lancedb_viz_read_only_audit"
     if name in sys.modules:
         return sys.modules[name]
-    server_dir = Path(__file__).resolve().parent
-    candidates = (
-        server_dir / "scripts" / "audit-memory-format.py",
-        server_dir.parent / "scripts" / "audit-memory-format.py",
-    )
-    path = next((candidate for candidate in candidates if candidate.is_file()), candidates[-1])
+    path = _audit_script_path()
+    if path is None:
+        raise FileNotFoundError(
+            "audit-memory-format.py is not available in this deployment; "
+            "ship the repository's scripts/ directory alongside server.py"
+        )
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module

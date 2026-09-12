@@ -7,13 +7,57 @@ import argparse
 from collections import Counter
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any, Iterable
 
 
-ROOT = Path(__file__).resolve().parents[1]
-CONTRACT_PATH = ROOT / "plugin" / "memory_contract.py"
+def _candidate_contract_paths() -> list[Path]:
+    """Every place memory_contract.py may live, in priority order."""
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[1] / "plugin" / "memory_contract.py",
+        # Deployed layout: deploy-local.sh ships the contract beside the script, so this
+        # resolves without depending on any path outside the deployment.
+        here.parent / "memory_contract.py",
+    ]
+    # Container layout: the memory plugin is reachable through the mount.
+    for base in (
+        Path("/home/hermes/.hermes/hermes-agent/plugins/memory/lancedb"),
+        Path("/home/hermes/.hermes/plugins/lancedb"),
+        Path("/app/plugin"),
+    ):
+        candidates.append(base / "memory_contract.py")
+    # The operator's canonical plugin copy, independent of HERMES_HOME overrides.
+    candidates.append(Path.home() / ".hermes" / "plugins" / "lancedb" / "memory_contract.py")
+    env_home = os.environ.get("HERMES_HOME")
+    if env_home:
+        home = Path(env_home)
+        candidates.append(home / "plugins" / "lancedb" / "memory_contract.py")
+        candidates.append(home / "hermes-agent" / "plugins" / "memory" / "lancedb" / "memory_contract.py")
+    return candidates
+
+
+def _find_contract_path() -> Path:
+    """Locate memory_contract.py wherever this script happens to be deployed.
+
+    In the repository the script sits at scripts/ with plugin/ as a sibling. In the
+    container only scripts/ is mounted, and the contract lives in the memory plugin
+    tree instead, so a single hardcoded relative path raised FileNotFoundError at
+    import time and took the whole Review page down with it.
+    """
+    candidates = _candidate_contract_paths()
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(
+        "memory_contract.py not found; looked in: "
+        + ", ".join(str(c) for c in candidates)
+    )
+
+
+CONTRACT_PATH = _find_contract_path()
 CONTRACT_SPEC = importlib.util.spec_from_file_location(
     "hermes_memory_contract", CONTRACT_PATH
 )
