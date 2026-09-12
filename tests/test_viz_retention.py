@@ -412,15 +412,31 @@ class VizRetentionTests(unittest.TestCase):
         self.assertIn("API + '/conflicts?'", app)
         self.assertIn("name === 'conflicts'", app)
 
-    def test_typed_highlight_reset_defines_shadow_size(self):
+    def test_typed_highlight_reset_restores_the_shared_resting_style(self):
+        """The reset must restore the same style the node was drawn with.
+
+        This replaces a test that asserted resetTypedHighlights redefined ageShadow
+        inline. That inline copy was the bug: it had different freshness buckets from
+        renderGraph, so deselecting a node could leave it styled differently from how
+        it was originally drawn. Both now call restingNodeStyle().
+        """
         graph = (ROOT / "static" / "graph.js").read_text()
-        match = re.search(
-            r"function resetTypedHighlights\(\) \{(?P<body>.*?)\n\}",
-            graph,
-            re.DOTALL,
-        )
+
+        resting = re.search(r"function restingNodeStyle\(n\) \{(?P<body>.*?)\n\}", graph, re.DOTALL)
+        self.assertIsNotNone(resting, "restingNodeStyle must exist as the single source of style")
+        self.assertRegex(resting.group("body"), r"\bageShadow\s*=")
+
+        match = re.search(r"function resetTypedHighlights\(\) \{(?P<body>.*?)\n\}", graph, re.DOTALL)
         self.assertIsNotNone(match)
-        self.assertRegex(match.group("body"), r"\bageShadow\s*=")
+        body = match.group("body")
+        self.assertIn("restingNodeStyle(", body)
+        # No second copy of the freshness ladder: divergence is the defect being fixed.
+        self.assertNotRegex(body, r"\bageShadow\s*=")
+
+        # renderGraph must use the same helper, or the two can drift apart again.
+        render = re.search(r"function renderGraph\(\) \{(?P<body>.*?)\n\}", graph, re.DOTALL)
+        self.assertIsNotNone(render)
+        self.assertIn("restingNodeStyle", render.group("body"))
 
     def test_legacy_update_routes_through_structured_store_update(self):
         update_store = FakeUpdateStore()

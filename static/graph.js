@@ -37,6 +37,50 @@ const colorHex = Object.fromEntries(Object.entries(catColors).map(([k,v]) => [k,
 const colorLabel = catLabels;
 const colorHexDef = defaultColor.hex;
 
+// Single source of truth for a node's resting style. This used to be duplicated in
+// three places with different freshness buckets, so deselecting a node could leave
+// it styled differently from how it had been drawn.
+function restingNodeStyle(n) {
+  const isHub = n.node_type === 'hub';
+  const c = isHub
+    ? { bg: '#12122a', border: '#818cf8', label: '#a5b4fc', glow: 'rgba(99,102,241,0.5)' }
+    : (catColors[n.category] || defaultColor);
+
+  // Freshness — glow driven by the category colour, the newer the brighter.
+  let ageBorder = c.border, ageGlow = c.glow, ageBW = 2, ageShadow = 10, ageLabel = '';
+  if (!isHub && n.created_at) {
+    const ageHours = (Date.now()/1000 - n.created_at) / 3600;
+    if (ageHours < 1)        { ageBorder = '#ffffff'; ageGlow = c.glow;                      ageBW = 4; ageShadow = 30; ageLabel = ' ◉'; }
+    else if (ageHours < 6)   { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.9');  ageBW = 3; ageShadow = 22; }
+    else if (ageHours < 24)  { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.7');  ageBW = 3; ageShadow = 16; }
+    else if (ageHours < 72)  { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.5');  ageBW = 2; ageShadow = 11; }
+    else if (ageHours < 168) { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.35'); ageBW = 2; ageShadow = 8; }
+    else if (ageHours < 720) { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.2');  ageBW = 1; ageShadow = 5; }
+    else                     { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.08'); ageBW = 1; ageShadow = 3; }
+  }
+
+  const sz = isHub ? 32 : Math.max(22, (n.size || 20) + Math.min((n.access_count || 0) * 0.5, 8));
+
+  return {
+    id: n.id, label: (n.label || '(empty)') + ageLabel, title: n.title || '',
+    color: {
+      background: c.bg,
+      border: ageBorder,
+      highlight: { background: c.bg, border: '#ffffff' },
+      hover: { background: c.bg, border: '#ffffff' },
+    },
+    font: { color: c.label, size: isHub ? 13 : 11, face: 'Fira Code, monospace', strokeWidth: 0 },
+    size: sz, shape: isHub ? 'box' : 'dot',
+    borderWidth: ageBW, borderWidthSelected: 3,
+    shadow: { enabled: true, color: ageGlow, size: ageShadow, x: 0, y: 0 },
+    opacity: 1.0,
+    hidden: false,
+    _category: n.category, _tier: n.tier || 'none',
+    _entities: (n.entities || []).join(' ').toLowerCase(),
+    _content: (n.label || '').toLowerCase(), _created: n.created_at || 0,
+  };
+}
+
 // ═══════════════════════════════════════════════
 // Load + Render
 // ═══════════════════════════════════════════════
@@ -90,46 +134,7 @@ function renderGraph() {
   if (fleg) fleg.style.display = 'flex';
 
   // Build vis.js nodes with neon glow
-  const visNodes = (allData.nodes || []).map(n => {
-    const isHub = n.node_type === 'hub';
-    let c = isHub
-      ? { bg: '#12122a', border: '#818cf8', label: '#a5b4fc', glow: 'rgba(99,102,241,0.5)' }
-      : (catColors[n.category] || defaultColor);
-
-    // Freshness — GLOW basé sur la couleur de la catégorie, plus c'est frais plus ça émet
-    let ageBorder = c.border, ageGlow = c.glow, ageBW = 2, ageShadow = 10, ageLabel = '';
-    if (!isHub && n.created_at) {
-      const ageHours = (Date.now()/1000 - n.created_at) / 3600;
-      if (ageHours < 1)        { ageBorder = '#ffffff'; ageGlow = c.glow;                    ageBW = 4; ageShadow = 30; ageLabel = ' ◉'; }
-      else if (ageHours < 6)   { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.9'); ageBW = 3; ageShadow = 22; }
-      else if (ageHours < 24)  { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.7'); ageBW = 3; ageShadow = 16; }
-      else if (ageHours < 72)  { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.5'); ageBW = 2; ageShadow = 11; }
-      else if (ageHours < 168) { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.35'); ageBW = 2; ageShadow = 8; }
-      else if (ageHours < 720) { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.2'); ageBW = 1; ageShadow = 5; }
-      else                     { ageBorder = c.border;  ageGlow = c.glow.replace('1.0','0.08'); ageBW = 1; ageShadow = 3; }
-    }
-
-    const sz = isHub ? 32 : Math.max(22, (n.size || 20) + Math.min((n.access_count || 0) * 0.5, 8));
-    const displayLabel = (n.label || '(empty)') + ageLabel;
-
-    return {
-      id: n.id, label: displayLabel, title: n.title || '',
-      color: {
-        background: c.bg,
-        border: ageBorder,
-        highlight: { background: c.bg, border: '#ffffff' },
-        hover: { background: c.bg, border: '#ffffff' },
-      },
-      font: { color: c.label, size: isHub ? 13 : 11, face: 'Fira Code, monospace', strokeWidth: 0 },
-      size: sz, shape: isHub ? 'box' : 'dot',
-      borderWidth: ageBW, borderWidthSelected: 3,
-      shadow: { enabled: true, color: ageGlow, size: ageShadow, x: 0, y: 0 },
-      opacity: 1.0,
-      _category: n.category, _tier: n.tier || 'none',
-      _entities: (n.entities || []).join(' ').toLowerCase(),
-      _content: (n.label || '').toLowerCase(), _created: n.created_at || 0,
-    };
-  });
+  const visNodes = (allData.nodes || []).map(restingNodeStyle);
 
   const visEdges = (allData.edges || []).map(e => {
     if (e.kind === 'declared') return {
@@ -147,11 +152,16 @@ function renderGraph() {
   });
 
   if (network) {
-    // Update in-place
+    // Update in-place, batched. These two loops issued one update per node, so a
+    // refresh or a graph reload redrew the canvas hundreds of times in a row.
     const oldIds = new Set(nodes.getIds());
     const newIds = new Set(visNodes.map(n => n.id));
-    for (const id of oldIds) { if (!newIds.has(id)) nodes.remove(id); }
-    for (const n of visNodes) { oldIds.has(n.id) ? nodes.update(n) : nodes.add(n); }
+    const removed = [...oldIds].filter(id => !newIds.has(id));
+    if (removed.length) nodes.remove(removed);
+    const added = [], changed = [];
+    for (const n of visNodes) { (oldIds.has(n.id) ? changed : added).push(n); }
+    if (added.length) nodes.add(added);
+    if (changed.length) nodes.update(changed);
     edges.clear(); edges.add(visEdges);
   } else {
     nodes.clear(); edges.clear();
@@ -233,17 +243,20 @@ function highlightTypedRelations(nodeId) {
   });
 
   // Cap the glow: at a low threshold a node can have hundreds of neighbours and
-  // lighting all of them up is noise, not information.
-  const ordered = [...relatedIds].slice(1, 25);
+  // lighting all of them up is noise, not information. slice(1, 26) keeps up to 25
+  // neighbours alongside the selected node.
+  const ordered = [...relatedIds].slice(1, 26);
   const glowIds = new Set([nodeId, ...ordered]);
 
   highlightedTypedEdges = glowIds;
 
-  // Apply violet glow to connected nodes
+  // Apply violet glow to connected nodes. Batched: one update per node made a click
+  // on a well-connected memory redraw the canvas 25 times.
+  const updates = [];
   glowIds.forEach(id => {
     const node = allData.nodes.find(n => n.id === id);
     if (!node) return;
-    nodes.update({
+    updates.push({
       id: id,
       borderWidth: 3,
       borderWidthSelected: 4,
@@ -256,40 +269,19 @@ function highlightTypedRelations(nodeId) {
       },
     });
   });
+  if (updates.length) nodes.update(updates);
 }
 
 function resetTypedHighlights() {
+  if (!highlightedTypedEdges.size) return;
+  // One batched update. This ran nodes.update() once per highlighted node, and each
+  // call redraws the whole canvas.
+  const restored = [];
   highlightedTypedEdges.forEach(id => {
     const n = allData.nodes.find(x => x.id === id);
-    if (!n) return;
-    const isHub = n.node_type === 'hub';
-    let c = isHub
-      ? { bg: '#12122a', border: '#818cf8', glow: 'rgba(99,102,241,0.5)' }
-      : (catColors[n.category] || defaultColor);
-
-    // Recompute age border
-    let ageBorder = c.border, ageGlow = c.glow, ageBW = 2, ageShadow = 10;
-    if (!isHub && n.created_at) {
-      const ageHours = (Date.now()/1000 - n.created_at) / 3600;
-      if (ageHours < 1)        { ageBorder = '#ffffff'; ageGlow = 'rgba(255,255,255,0.9)'; ageBW = 3; ageShadow = 30; }
-      else if (ageHours < 24)  { ageBorder = '#e0e7ff'; ageGlow = 'rgba(199,210,254,0.7)'; ageShadow = 16; }
-      else if (ageHours < 168) { ageBorder = '#a5b4fc'; ageGlow = 'rgba(165,180,252,0.5)'; ageShadow = 8; }
-      else if (ageHours < 720) { ageBorder = '#6366f1'; ageGlow = 'rgba(99,102,241,0.35)'; ageShadow = 5; }
-      else                     { ageBorder = '#4338ca'; ageGlow = 'rgba(67,56,202,0.2)'; ageShadow = 3; }
-    }
-    nodes.update({
-      id: id,
-      borderWidth: ageBW,
-      borderWidthSelected: 3,
-      shadow: { enabled: true, color: ageGlow, size: ageShadow, x: 0, y: 0 },
-      color: {
-        background: c.bg,
-        border: ageBorder,
-        highlight: { border: '#ffffff' },
-        hover: { border: '#ffffff' },
-      },
-    });
+    if (n) restored.push(restingNodeStyle(n));
   });
+  if (restored.length) nodes.update(restored);
   highlightedTypedEdges.clear();
 }
 
@@ -625,7 +617,9 @@ function closeSidebar() {
   resetTypedHighlights();
   document.getElementById('sidebar').classList.remove('open');
   if (network) network.unselectAll();
-  applyFilters();
+  // No applyFilters() here: clicking empty space fires this on every stray click, and
+  // the filter state has not changed. Restoring the ~25 glowing nodes already redraws
+  // what needs redrawing.
 }
 
 function focusNode(nodeId) {
@@ -675,11 +669,14 @@ function applyFilters() {
     if (tierOk && searchOk && catOk) matches.add(n.id);
   });
 
+  // One batched update for the whole corpus. This called nodes.update() once per node
+  // (471 of them), and each call redraws the entire canvas: the click felt frozen.
+  const updates = [];
   nodes.forEach(node => {
     const isMatch = matches.has(node.id);
     let opacity = 1.0;
     if (active && !isMatch) opacity = 0.18;
-    nodes.update({
+    updates.push({
       id: node.id,
       hidden: false,
       opacity,
@@ -687,6 +684,7 @@ function applyFilters() {
       borderWidth: active && isMatch ? 2.5 : 1,
     });
   });
+  if (updates.length) nodes.update(updates);
   updateBudgetLabel(matches.size, active);
 }
 
