@@ -45,19 +45,17 @@ async function loadGraph() {
   document.getElementById('loading').style.display = 'block';
   const threshold = document.getElementById('threshold-slider')?.value || 0.8;
   const relationType = document.getElementById('relation-filter')?.value || '';
-  if (!selectedNodeId) {
-    allData = {nodes: [], edges: [], typed_edges: [], selection_required: true, hidden_neighbor_count: 0};
-    renderGraph();
-    const loading = document.getElementById('loading');
-    loading.style.display = 'block';
-    loading.innerHTML = '<div>Select a search result or memory to load a bounded neighborhood.</div>';
-    return;
-  }
+  // No selection means the bounded overview, not an empty canvas. The server
+  // answers with the most connected memories and their strongest links.
+  const query = selectedNodeId
+    ? '/api/graph?memory_id=' + encodeURIComponent(selectedNodeId) +
+      '&threshold=' + threshold + '&relation_types=' + encodeURIComponent(relationType)
+    : '/api/graph?threshold=' + threshold;
   try {
-    const resp = await fetch('/api/graph?memory_id=' + encodeURIComponent(selectedNodeId) + '&threshold=' + threshold + '&relation_types=' + encodeURIComponent(relationType));
+    const resp = await fetch(query);
     allData = await resp.json();
     renderGraph();
-    if (!allData.error && allData.nodes.some(node => node.id === selectedNodeId)) openSidebar(selectedNodeId);
+    if (selectedNodeId && !allData.error && allData.nodes.some(node => node.id === selectedNodeId)) openSidebar(selectedNodeId);
   } catch (e) {
     console.error('Failed to load graph:', e);
     document.getElementById('loading').innerHTML = 'Load error. Check server.';
@@ -648,42 +646,50 @@ function applyFilters() {
   const t2 = document.getElementById('tier2')?.checked ?? true;
   const t3 = document.getElementById('tier3')?.checked ?? true;
 
-  // Nodes that match tier filter
-  const tierMatch = new Set();
+  // The graph always shows every memory. Filters never remove nodes from view:
+  // a search or a category highlights what matches and dims the rest, so the
+  // overall shape of the corpus stays visible while you look for something.
+  const matches = new Set();
+  const active = Boolean(searchText) || Boolean(catFilter);
   (allData.nodes || []).forEach(n => {
     const tier = n.tier || 'none';
-    if ((t1 && tier === '1') || (t2 && tier === '2') || (t3 && tier === '3') || tier === 'none') tierMatch.add(n.id);
-  });
-
-  // Primary visible: match tier + search + category
-  const primaryIds = new Set();
-  (allData.nodes || []).forEach(n => {
-    if (!tierMatch.has(n.id)) return;
+    const tierOk = (t1 && tier === '1') || (t2 && tier === '2') ||
+                   (t3 && tier === '3') || tier === 'none';
     const content = ((n.label || '') + ' ' + (n.title || '')).toLowerCase();
     const entities = (n.entities || []).join(' ').toLowerCase();
-    const matchesSearch = !searchText || content.includes(searchText) || entities.includes(searchText);
-    const matchesCat = !catFilter || n.category === catFilter;
-    if (matchesSearch && matchesCat) primaryIds.add(n.id);
+    const searchOk = !searchText || content.includes(searchText) || entities.includes(searchText);
+    const catOk = !catFilter || n.category === catFilter;
+    if (tierOk && searchOk && catOk) matches.add(n.id);
   });
-
-  // Ghost: nodes connected to primary but NOT matching tier filter
-  const ghostIds = new Set();
-  (allData.edges || []).forEach(e => {
-    if (primaryIds.has(e.from) && !primaryIds.has(e.to) && !tierMatch.has(e.to)) ghostIds.add(e.to);
-    if (primaryIds.has(e.to) && !primaryIds.has(e.from) && !tierMatch.has(e.from)) ghostIds.add(e.from);
-  });
-
-  const allVisible = new Set([...primaryIds, ...ghostIds]);
 
   nodes.forEach(node => {
-    if (primaryIds.has(node.id)) {
-      nodes.update({ id: node.id, hidden: false, opacity: 1.0 });
-    } else if (ghostIds.has(node.id)) {
-      nodes.update({ id: node.id, hidden: false, opacity: 0.3 });
-    } else {
-      nodes.update({ id: node.id, hidden: true });
-    }
+    const isMatch = matches.has(node.id);
+    let opacity = 1.0;
+    if (active && !isMatch) opacity = 0.18;
+    nodes.update({
+      id: node.id,
+      hidden: false,
+      opacity,
+      // Highlighted nodes get a white border so a search reads at a glance.
+      borderWidth: active && isMatch ? 2.5 : 1,
+    });
   });
+  updateBudgetLabel(matches.size, active);
+}
+
+function updateBudgetLabel(matchCount, filtered) {
+  const el = document.getElementById('hidden-neighbor-count');
+  if (!el) return;
+  const total = (allData.nodes || []).length;
+  const edges = (allData.edges || []).length;
+  if (selectedNodeId) {
+    const hidden = allData.hidden_neighbor_count || 0;
+    const byFilter = allData.hidden_by_relation_filter || 0;
+    el.textContent = hidden + ' hidden by budget · ' + byFilter + ' hidden by relation filter';
+    return;
+  }
+  el.textContent = total + ' memories · ' + edges + ' links' +
+    (filtered ? ' · ' + matchCount + ' match' : '');
 }
 
 function countEntities(nodesArr) {

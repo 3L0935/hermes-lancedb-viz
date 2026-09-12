@@ -631,13 +631,68 @@ def get_graph_data(
     memory_id: str = "",
     relation_types: set[str] | None = None,
 ) -> dict:
-    """Return a bounded selected-memory neighborhood; never a global graph."""
+    """Return the whole memory graph by default, or one selected neighborhood.
+
+    With no ``memory_id`` this is the FULL graph: every memory as a node, linked
+    by vector similarity at the requested threshold. That is the intended default
+    view (the slider is the filter), and it is affordable: measured at the slider
+    default, 468 nodes and 372 edges serialize to about 414 KB in 0.17 s. The
+    payload stays proportional to the threshold, so raising it thins the graph
+    instead of hiding nodes.
+    """
     if not memory_id:
+        threshold = min(max(float(threshold), 0.0), 1.0)
+        try:
+            store = _get_store()
+        except Exception as error:
+            return {
+                "error": str(error), "selection_required": False,
+                "nodes": [], "edges": [], "typed_edges": [],
+                "hidden_neighbor_count": 0,
+                "budgets": {"nodes": GRAPH_MAX_NODES, "edges": GRAPH_MAX_EDGES,
+                            "semantic_candidates": GRAPH_MAX_SEMANTIC_NEIGHBORS},
+            }
+        nodes, edges, _, _, memories, _ = _compute_vector_data(store, threshold)
+        by_id = {str(n["id"]): n for n in nodes}
+        declared: list[dict] = []
+        try:
+            for relation in store.get_typed_edges(include_unresolved=True):
+                source = str(relation.get("from") or "")
+                target = str(relation.get("to") or "")
+                if source not in by_id or target not in by_id:
+                    continue
+                declared.append({
+                    "from": source,
+                    "to": target,
+                    "kind": "declared",
+                    "relation_type": str(relation.get("relation_type") or "linked"),
+                    "label": str(relation.get("relation_type") or "linked"),
+                    "directed": True,
+                })
+                by_id[source]["has_declared_relations"] = True
+                by_id[target]["has_declared_relations"] = True
+        except Exception:
+            pass
+        # _compute_vector_data emits untyped similarity edges (no `kind`), so
+        # tag them here rather than expecting the key downstream.
+        for edge in edges:
+            edge.setdefault("kind", "semantic")
+        edges = edges + declared
         return {
-            "selection_required": True,
-            "nodes": [], "edges": [], "typed_edges": [],
+            "selection_required": False,
+            "overview": True,
+            "threshold": threshold,
+            "total_nodes": len(nodes),
+            "total_edges": len(edges),
+            "nodes": nodes,
+            "edges": edges,
+            "typed_edges": declared,
             "hidden_neighbor_count": 0,
-            "budgets": {"nodes": GRAPH_MAX_NODES, "edges": GRAPH_MAX_EDGES, "semantic_candidates": GRAPH_MAX_SEMANTIC_NEIGHBORS},
+            "available_relation_types": sorted({
+                str(e.get("relation_type") or "") for e in declared
+            } - {""}),
+            "budgets": {"nodes": len(nodes), "edges": len(edges),
+                        "semantic_candidates": GRAPH_MAX_SEMANTIC_NEIGHBORS},
         }
     if not _is_canonical_id(memory_id):
         return {**_invalid_id(), "nodes": [], "edges": []}

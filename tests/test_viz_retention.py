@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import re
 import tempfile
 import unittest
@@ -511,13 +512,42 @@ class VizRetentionTests(unittest.TestCase):
         self.assertNotIn("name === 'review') loadReviewInbox()", app)
         self.assertIn("Older does not mean false", html)
 
-    def test_graph_requires_selection_instead_of_building_global_matrix(self):
-        with patch.object(server, "_compute_vector_data", side_effect=AssertionError("global scan")):
-            result = server.get_graph_data()
+    def test_graph_without_selection_returns_the_full_bounded_view(self):
+        """No selection means the whole graph, which is the intended default.
 
-        self.assertTrue(result["selection_required"])
-        self.assertEqual([], result["nodes"])
-        self.assertEqual([], result["edges"])
+        This replaces a test that asserted an empty graph. The earlier guard
+        existed because building a global matrix was unbounded; the protection is
+        kept, but as a cost bound rather than by refusing to render: the default
+        view must cover every memory and still stay within the payload budget.
+        """
+        nodes = [
+            {"id": f"a{index:010d}", "label": f"N{index}", "title": f"Fact {index}",
+             "category": "fact", "created_at": 0.0, "access_count": 0,
+             "entities": [], "relations": [], "tier": "2", "color": "#06b6d4",
+             "size": 20, "node_type": "leaf"}
+            for index in range(120)
+        ]
+        edges = [
+            {"from": nodes[index]["id"], "to": nodes[index + 1]["id"],
+             "label": "0.90", "color": {"color": "#6366f1", "opacity": 0.5}}
+            for index in range(119)
+        ]
+        with patch.object(server, "_compute_vector_data",
+                          return_value=(nodes, edges, {}, None, [], 0.8)), \
+             patch.object(server, "_get_store", return_value=SimpleNamespace(
+                 get_typed_edges=lambda include_unresolved=False: [
+                     {"from": nodes[0]["id"], "to": nodes[1]["id"],
+                      "relation_type": "depends"}
+                 ])):
+            result = server.get_graph_data(threshold=0.8)
+
+        self.assertFalse(result["selection_required"])
+        self.assertEqual(120, len(result["nodes"]))
+        self.assertEqual(120, result["total_edges"])
+        self.assertEqual(1, len(result["typed_edges"]))
+        self.assertTrue(all(edge.get("kind") for edge in result["edges"]))
+        self.assertEqual(["depends"], result["available_relation_types"])
+        self.assertLess(len(json.dumps(result)), 200_000)
 
     def test_neighborhood_graph_is_bounded_and_distinguishes_edge_kinds(self):
         center = {"id": MEMORY_ID, "content": "Project:Center state=active [Tier=2]", "category": "project"}

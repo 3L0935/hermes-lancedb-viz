@@ -551,3 +551,21 @@ input[type=range] { height: 4px; accent-color: var(--indigo); cursor: pointer; }
 .search-item .s-why { float:right; margin-left:6px; }
 .why-btn { padding:0 5px; border:1px solid var(--border-glow); border-radius:4px; background:none; color:#a5b4fc; font:700 10px 'Fira Code', monospace; cursor:pointer; }
 .why-btn:hover { border-color:var(--accent); color:#e2e8f0; }
+
+/* ── Graph budget label ───────────────────────────────────────────────
+   Was rendered with the browser default font because the class had no rule,
+   so it stood out against the rest of the toolbar. */
+.graph-budget { margin-left:auto; color:var(--muted); font:11px 'Fira Code', monospace; letter-spacing:.02em; }
+
+/* ── Manual compaction panel ──────────────────────────────────────────
+   Same defect: app.js injected these elements with no styling at all. */
+.compact-plan { margin-top:12px; padding:14px; border:1px solid var(--border); border-radius:8px; background:rgba(10,10,22,.75); }
+.compact-plan > p { margin:10px 0 6px; color:var(--muted); font-size:11px; }
+.compact-plan > ul { margin:0 0 6px; padding-left:18px; color:var(--dim); font:10px 'Fira Code', monospace; }
+.compact-metrics { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:12px; }
+.compact-metrics > span { display:flex; align-items:baseline; gap:6px; padding:9px 11px; border:1px solid var(--border); border-radius:7px; background:rgba(10,10,22,.72); color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.06em; }
+.compact-metrics > span > b { color:#cbd5e1; font:600 13px 'Fira Code', monospace; text-transform:none; letter-spacing:0; }
+.compact-plan code { padding:2px 6px; border:1px solid var(--border); border-radius:4px; background:rgba(8,8,16,.85); color:var(--accent-soft); font:10px 'Fira Code', monospace; word-break:break-all; }
+.compact-confirm { display:flex; align-items:flex-start; gap:8px; margin:12px 0; color:#cbd5e1; font-size:11px; line-height:1.5; cursor:pointer; }
+.compact-confirm > input { margin-top:2px; accent-color:var(--indigo); }
+.compact-result { max-height:260px; margin:12px 0 0; padding:11px 12px; overflow:auto; border:1px solid var(--border); border-left:3px solid var(--green); border-radius:7px; background:rgba(8,8,16,.85); color:#cbd5e1; font:10px 'Fira Code', monospace; white-space:pre-wrap; }

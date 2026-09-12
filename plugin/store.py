@@ -3122,27 +3122,75 @@ class LanceDBStore:
                     )
 
     def _rebuild_all_links(self) -> None:
-        """Rebuild all entity-based links across the entire store."""
+        """Rebuild entity-based links and write back ONLY the rows that changed.
+
+        The previous version issued one ``_table.update`` per memory, in a loop
+        over the whole corpus. Measured on a 468-row store: that is 469 table
+        versions and 467 fragments (7.93 s) for a single delete, because Lance
+        creates a version and a fragment per update. Two consequences, both real:
+        the database balloons, and the full-text index goes stale for the whole
+        duration, which silently changes the BM25 scale the abstention threshold
+        was calibrated against (a must-abstain question scored 12.23 with a
+        current index and 0.74 with a stale one).
+
+        The computation is unchanged; only the writes are now differential. Rows
+        whose link list is identical to what is stored are not rewritten at all.
+        """
         all_memories = self.get_all()
         mem_sigs = {}
+        stored_links = {}
         for m in all_memories:
             entities = set(m.get("entities", []))
             sig = {e for e in entities if e not in _STOP_ENTITIES}
-            mem_sigs[m["id"]] = sig
+            mem_id = str(m["id"])
+            mem_sigs[mem_id] = sig
+            raw_links = m.get("links") or []
+            if isinstance(raw_links, str):
+                try:
+                    raw_links = json.loads(raw_links)
+                except (json.JSONDecodeError, TypeError):
+                    raw_links = []
+            stored_links[mem_id] = [str(link) for link in raw_links]
 
-        all_ids = list(mem_sigs.keys())
-        for i, mid in enumerate(all_ids):
-            linked = []
-            for j, other in enumerate(all_ids):
-                if i == j:
-                    continue
-                shared = mem_sigs[mid] & mem_sigs[other]
-                if len(shared) >= 2:
-                    linked.append(other)
-            linked = linked[:8]
+        # Candidate pairs come from an inverted signature index (a pair can only
+        # link when it shares >= 2 signature entities), so the scan is O(pairs)
+        # instead of O(n^2) over every couple.
+        by_entity: dict[str, list[str]] = {}
+        for mem_id, sig in mem_sigs.items():
+            for entity in sig:
+                by_entity.setdefault(entity, []).append(mem_id)
+
+        pair_counts: dict[tuple[str, str], int] = {}
+        for members in by_entity.values():
+            if len(members) < 2:
+                continue
+            members = sorted(members)
+            for i, left in enumerate(members):
+                for right in members[i + 1:]:
+                    key = (left, right)
+                    pair_counts[key] = pair_counts.get(key, 0) + 1
+
+        linked: dict[str, list[str]] = {mem_id: [] for mem_id in mem_sigs}
+        for (left, right), shared in pair_counts.items():
+            if shared < 2:
+                continue
+            linked[left].append(right)
+            linked[right].append(left)
+
+        # Kept in scan order, exactly as the previous implementation did, so the
+        # retained subset does not change. Only the writes became differential.
+        scan_order = {mem_id: position for position, mem_id in enumerate(mem_sigs)}
+        changed = 0
+        for mem_id, candidates in linked.items():
+            targets = sorted(candidates, key=scan_order.get)[:8]
+            if set(targets) == set(stored_links.get(mem_id) or []):
+                continue
             self._table.update(
-                f"id = {_sql_literal(mid)}", {"links": json.dumps(linked)}
+                f"id = {_sql_literal(mem_id)}", {"links": json.dumps(targets)}
             )
+            changed += 1
+        if changed:
+            logger.info("links rebuilt for %d of %d memories", changed, len(mem_sigs))
 
     @_serialized_mutation
     def update_entities(self, memory_id: str, entities: list[str]) -> bool:
