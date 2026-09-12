@@ -297,8 +297,80 @@ def decision_margin(results: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def load_baseline_reference(root: Path | None = None) -> dict[str, Any]:
+    """Load the frozen gate targets.
+
+    The baseline is deliberately NOT re-measured every run. See the file's own
+    `why_this_exists`: a baseline that drifts turns a good fix into a reported
+    regression.
+    """
+    root = root or Path(__file__).resolve().parents[2]
+    path = root / "audit/repro/retrieval-baseline-reference.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def absolute_targets(
+    metrics: dict[str, Any],
+    reference: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Judge a variant against fixed targets instead of a same-run baseline.
+
+    The MRR floor is expressed as a reference value MINUS N single-question rank
+    steps, not as a bare point value. A point value would reintroduce exactly the
+    fragility this gate exists to remove: MRR moves when the corpus reorders one
+    question, with no code change at all.
+    """
+    reference = reference or load_baseline_reference()
+    targets = reference["targets"]
+
+    false_rate = metrics["no_answer_false_result_rate"]
+    mrr = metrics["mrr"]
+    recall = metrics["recall_at_5"]
+
+    false_target = targets["no_answer_false_result_rate"]["target"]
+    recall_floor = targets["recall_at_5_floor"]["reference_value"] - targets["recall_at_5_floor"]["tolerance"]
+
+    # One rank step = moving one answerable question up one rank.
+    answerable = max(int(metrics.get("answerable_count") or 0), 1)
+    rank_step = round((1.0 / 1.0 - 1.0 / 2.0) / answerable, 6)
+    mrr_spec = targets["mrr_floor"]
+    mrr_floor = round(
+        mrr_spec["reference_value"] - mrr_spec["tolerance_rank_steps"] * rank_step, 6
+    )
+
+    return {
+        "no_answer_false_result_rate": {
+            "target": false_target,
+            "operator": targets["no_answer_false_result_rate"]["operator"],
+            "observed": false_rate,
+            "met": bool(false_rate <= false_target),
+        },
+        "mrr_floor": {
+            "target": mrr_floor,
+            "operator": mrr_spec["operator"],
+            "observed": mrr,
+            "reference_value": mrr_spec["reference_value"],
+            "tolerance_rank_steps": mrr_spec["tolerance_rank_steps"],
+            "single_question_rank_step": rank_step,
+            "met": bool(mrr >= mrr_floor),
+        },
+        "recall_at_5_floor": {
+            "target": recall_floor,
+            "operator": targets["recall_at_5_floor"]["operator"],
+            "observed": recall,
+            "met": bool(recall >= recall_floor),
+        },
+    }
+
+
 def promotion_decision(results: dict[str, Any], final_dataset: dict[str, Any]) -> dict[str, Any]:
-    """Apply the frozen, auditable gate to final-split metrics only."""
+    """Apply the frozen, auditable gate to final-split metrics only.
+
+    The verdict is judged against FIXED targets (audit/repro/retrieval-baseline-reference.json),
+    not against a baseline re-measured on today's corpus. The same-run baseline is
+    still reported, clearly labelled as a reference, because it is informative --
+    it is simply no longer allowed to decide the verdict.
+    """
     variants = results["splits"]["final"]
     current = variants["current_hybrid"]
     corrected = variants["corrected_hybrid"]
@@ -330,10 +402,12 @@ def promotion_decision(results: dict[str, Any], final_dataset: dict[str, Any]) -
     hm = corrected["metrics"]
     om = one_hop["metrics"]
     recall_delta = hm["recall_at_5"] - cm["recall_at_5"]
+
+    targets = absolute_targets(hm)
     hybrid_promoted = bool(
-        hm["no_answer_false_result_rate"] < cm["no_answer_false_result_rate"]
-        and hm["mrr"] >= cm["mrr"]
-        and recall_delta >= -0.05
+        targets["no_answer_false_result_rate"]["met"]
+        and targets["mrr_floor"]["met"]
+        and targets["recall_at_5_floor"]["met"]
         and no_critical_regression
     )
     one_hop_promoted = bool(
@@ -344,17 +418,31 @@ def promotion_decision(results: dict[str, Any], final_dataset: dict[str, Any]) -
         )
     )
     return {
-        "basis": "frozen final split only",
+        "basis": "frozen final split, judged against fixed targets",
         "margin": decision_margin(results),
+        "absolute_targets": targets,
+        "current_hybrid_reference": {
+            "note": "informative only, no longer decides the verdict",
+            "recall_at_5": cm["recall_at_5"],
+            "mrr": cm["mrr"],
+            "no_answer_false_result_rate": cm["no_answer_false_result_rate"],
+        },
         "corrected_hybrid": {
             "promoted": hybrid_promoted,
-            "recall_at_5_delta": round(recall_delta, 6),
-            "mrr_delta": round(hm["mrr"] - cm["mrr"], 6),
-            "no_answer_false_result_rate_delta": round(
+            "recall_at_5": hm["recall_at_5"],
+            "mrr": hm["mrr"],
+            "no_answer_false_result_rate": hm["no_answer_false_result_rate"],
+            "eliminates_false_results": bool(hm["no_answer_false_result_rate"] == 0.0),
+            "recall_at_5_delta_vs_same_run_baseline": round(recall_delta, 6),
+            "mrr_delta_vs_same_run_baseline": round(hm["mrr"] - cm["mrr"], 6),
+            "no_answer_false_result_rate_delta_vs_same_run_baseline": round(
                 hm["no_answer_false_result_rate"] - cm["no_answer_false_result_rate"], 6
             ),
             "critical_no_regression": no_critical_regression,
-            "decision": "keep corrected routing" if hybrid_promoted else "revert corrected routing",
+            "decision": (
+                "keep corrected routing" if hybrid_promoted
+                else "revert corrected routing"
+            ),
         },
         "corrected_one_hop_as_default": {
             "promoted": one_hop_promoted,

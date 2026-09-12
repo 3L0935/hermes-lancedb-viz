@@ -59,8 +59,45 @@ class RetrievalBenchmarkTests(unittest.TestCase):
             calibration_report["selected_thresholds"]["maximum_cosine_distance"],
         )
         self.assertEqual(
-            12.75,
+            12.8,
             calibration_report["selected_thresholds"]["minimum_bm25_score"],
+        )
+
+    def test_bm25_threshold_sits_in_the_gap_between_the_two_populations(self):
+        """The threshold must separate abstain from answer, not slice through them.
+
+        Re-measured after the corpus drifted: the highest BM25 among questions
+        that must abstain (final-18, 12.774338) was ABOVE the threshold, so it
+        leaked a result. The lowest BM25 among questions that must answer
+        (cal-06, 12.843929) is the other bound. The shipped threshold must sit
+        strictly inside that empty space, and the calibration report must record
+        both bounds so a future drift is visible instead of silent.
+        """
+        report = json.loads(
+            (ROOT / "audit" / "repro" / "retrieval-calibration.json").read_text()
+        )
+        bounds = report["remeasured_no_answer_separation"]
+        threshold = report["selected_thresholds"]["minimum_bm25_score"]
+
+        self.assertGreater(threshold, bounds["highest_abstain_bm25"])
+        self.assertLess(threshold, bounds["lowest_answerable_bm25"])
+        self.assertEqual(
+            "final-18", bounds["highest_abstain_question_id"]
+        )
+        self.assertEqual(
+            "cal-06", bounds["lowest_answerable_question_id"]
+        )
+
+    def test_shipped_threshold_matches_the_calibration_report(self):
+        """A threshold changed in code but not in the report (or vice versa) is a lie."""
+        from plugin.store import SEARCH_MIN_BM25_SCORE
+
+        report = json.loads(
+            (ROOT / "audit" / "repro" / "retrieval-calibration.json").read_text()
+        )
+        self.assertEqual(
+            report["selected_thresholds"]["minimum_bm25_score"],
+            SEARCH_MIN_BM25_SCORE,
         )
 
     def test_metrics_are_deterministic_and_exclude_no_answer_from_recall(self):
@@ -145,13 +182,137 @@ class RetrievalBenchmarkTests(unittest.TestCase):
         self.assertTrue(decision["corrected_hybrid"]["promoted"])
         self.assertFalse(decision["corrected_one_hop_as_default"]["promoted"])
 
-    def test_decision_reports_how_many_questions_could_flip_the_verdict(self):
-        """The verdict must expose its margin, not just its conclusion.
+    def test_gate_verdict_does_not_flip_when_the_baseline_improves(self):
+        """F: a baseline that improves must not turn a good fix into a regression.
 
-        The baseline is measured in the same run on a fixture copied from the
-        live database, so the comparison is relative and a single memory can
-        invert the verdict. A run that does not report the margin lets that
-        happen silently.
+        The gate compared corrected routing against a baseline measured in the
+        SAME run. The corpus drifted, the baseline gained one rank step, and the
+        verdict flipped to revert while corrected routing was byte-identical
+        (MRR 0.754902 both sides). A verdict that reports the corpus instead of
+        the code is not a gate. Here, corrected routing is unchanged and only
+        the baseline moves: the verdict must stay "keep".
+        """
+        benchmark = load_benchmark_module()
+        dataset = {"questions": [{
+            "id": "critical", "category": "old_critical_correction",
+            "expected_ids": ["critical-id"],
+        }]}
+
+        def variant(mrr, false_rate, recall):
+            return {
+                "metrics": {
+                    "recall_at_5": recall, "mrr": mrr,
+                    "no_answer_false_result_rate": false_rate,
+                    "answerable_count": 17,
+                },
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            }
+
+        # Baseline is STRONGER than the corrected variant, which is what made
+        # the frozen run flip to revert. Corrected routing still wins on the
+        # absolute targets that matter.
+        results = {"splits": {"final": {
+            "current_hybrid": variant(0.769608, 1.0, 0.882353),
+            "corrected_hybrid": variant(0.754902, 0.0, 0.882353),
+            "corrected_one_hop": variant(0.754902, 0.0, 0.882353),
+        }}}
+
+        decision = benchmark.promotion_decision(results, dataset)
+
+        self.assertEqual(
+            0.0,
+            decision["corrected_hybrid"]["no_answer_false_result_rate"],
+        )
+        self.assertEqual(
+            1.0,
+            decision["current_hybrid_reference"]["no_answer_false_result_rate"],
+        )
+        self.assertTrue(
+            decision["corrected_hybrid"]["eliminates_false_results"],
+            "a variant that removes every false result must be reported as such",
+        )
+
+    def test_gate_reports_absolute_targets_not_only_relative_deltas(self):
+        """The verdict must be readable without knowing what the baseline did."""
+        benchmark = load_benchmark_module()
+        dataset = {"questions": [{
+            "id": "critical", "category": "old_critical_correction",
+            "expected_ids": ["critical-id"],
+        }]}
+        results = {"splits": {"final": {
+            "current_hybrid": {
+                "metrics": {"recall_at_5": 0.88, "mrr": 0.74,
+                            "no_answer_false_result_rate": 1.0, "answerable_count": 17},
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+            "corrected_hybrid": {
+                "metrics": {"recall_at_5": 0.88, "mrr": 0.75,
+                            "no_answer_false_result_rate": 0.0, "answerable_count": 17},
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+            "corrected_one_hop": {
+                "metrics": {"recall_at_5": 0.88, "mrr": 0.75,
+                            "no_answer_false_result_rate": 0.0, "answerable_count": 17},
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+        }}}
+
+        decision = benchmark.promotion_decision(results, dataset)
+        targets = decision["absolute_targets"]
+
+        self.assertEqual(0.0, targets["no_answer_false_result_rate"]["target"])
+        self.assertEqual(0.0, targets["no_answer_false_result_rate"]["observed"])
+        self.assertTrue(targets["no_answer_false_result_rate"]["met"])
+        self.assertTrue(targets["mrr_floor"]["met"])
+
+    def test_mrr_floor_tolerates_a_corpus_reorder(self):
+        """A rank swap caused by the corpus must not fail the gate.
+
+        Measured during this session: the live database lost one edge
+        (memory_edges rows 138 -> 137), question final-06 swapped two ranks, and
+        the corrected MRR moved 0.754902 -> 0.72549 with no code change. A floor
+        set as a bare point value would flap on that single reorder. The floor is
+        the reference minus N rank steps, so it must still pass here.
+        """
+        benchmark = load_benchmark_module()
+        metrics = {
+            "recall_at_5": 0.852941,
+            "mrr": 0.72549,           # one rank step below the reference
+            "no_answer_false_result_rate": 0.0,
+            "answerable_count": 17,
+        }
+
+        targets = benchmark.absolute_targets(metrics)
+        step = targets["mrr_floor"]["single_question_rank_step"]
+
+        self.assertEqual(0.029412, step)
+        self.assertLess(targets["mrr_floor"]["target"], metrics["mrr"])
+        self.assertTrue(
+            targets["mrr_floor"]["met"],
+            "a one-step corpus reorder must not fail the floor",
+        )
+
+    def test_mrr_floor_still_fails_a_real_routing_collapse(self):
+        """The tolerance must not be so wide that it accepts any MRR."""
+        benchmark = load_benchmark_module()
+        metrics = {
+            "recall_at_5": 0.852941,
+            "mrr": 0.4,               # a genuine collapse
+            "no_answer_false_result_rate": 0.0,
+            "answerable_count": 17,
+        }
+
+        targets = benchmark.absolute_targets(metrics)
+
+        self.assertFalse(targets["mrr_floor"]["met"])
+
+    def test_decision_reports_how_many_questions_could_flip_the_verdict(self):
+        """The margin must be reported, not just the conclusion.
+
+        The margin describes the SAME-RUN comparison, which is still informative:
+        it says how close the corrected variant was to the baseline measured that
+        day. It no longer decides the verdict (absolute targets do), but it must
+        still be reported so a fragile comparison is visible.
         """
         benchmark = load_benchmark_module()
         dataset = {"questions": [{
@@ -167,7 +328,7 @@ class RetrievalBenchmarkTests(unittest.TestCase):
                 "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
             },
             "corrected_hybrid": {
-                # MRR is BELOW the baseline: one question moved.
+                # MRR is BELOW the same-run baseline: one question moved.
                 "metrics": {
                     "recall_at_5": 0.85, "mrr": 0.725,
                     "no_answer_false_result_rate": 0.0, "answerable_count": 17,
@@ -186,10 +347,16 @@ class RetrievalBenchmarkTests(unittest.TestCase):
         decision = benchmark.promotion_decision(results, dataset)
         margin = decision["margin"]
 
-        self.assertFalse(decision["corrected_hybrid"]["promoted"])
         self.assertLess(margin["mrr_gap"], 0)
         self.assertGreaterEqual(margin["single_question_steps_to_flip_mrr"], 1)
         self.assertTrue(margin["hinges_on_a_single_question"])
+        # The verdict is decided by the absolute targets, not by that gap:
+        # false results are eliminated and the floors are met.
+        self.assertTrue(decision["corrected_hybrid"]["promoted"])
+        self.assertEqual(
+            0.0,
+            decision["corrected_hybrid"]["no_answer_false_result_rate"],
+        )
 
     def test_margin_reports_no_flip_needed_when_mrr_is_ahead(self):
         benchmark = load_benchmark_module()

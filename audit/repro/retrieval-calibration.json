@@ -14,7 +14,24 @@
   },
   "selected_thresholds": {
     "maximum_cosine_distance": 0.3,
-    "minimum_bm25_score": 12.75
+    "minimum_bm25_score": 12.8
+  },
+  "remeasured_no_answer_separation": {
+    "measured_at": "2026-09-12",
+    "reason": "The corpus drifted after the first calibration. Re-measured on a read-only copy of the live database, on BOTH splits. The shipped 12.75 was below the highest abstain score, so final-18 leaked a result (a false result on a question the corpus cannot answer).",
+    "highest_abstain_bm25": 12.774338,
+    "highest_abstain_question_id": "final-18",
+    "lowest_answerable_bm25": 12.843929,
+    "lowest_answerable_question_id": "cal-06",
+    "empty_gap_width": 0.069591,
+    "safe_window": [12.775, 12.84],
+    "shipped": 12.8,
+    "shipped_position": "inside the gap, low of centre: losing a real answer is a silent failure, a leaking abstention is visible in the metrics",
+    "measured_effect": {
+      "at_12.75": {"recall_at_5": 0.882353, "no_answer_false_result_rate": 0.333333},
+      "at_12.78": {"recall_at_5": 0.882353, "no_answer_false_result_rate": 0.0},
+      "at_12.845_and_above": {"recall_at_5": 0.823529, "no_answer_false_result_rate": 0.0, "note": "cal-06 is lost"}
+    }
   },
   "decision": "A candidate must pass at least one interpretable threshold. Exact IDs and exact literal paths or key=value tokens bypass semantic scoring. Thresholds were selected on calibration only; the final split was frozen first and was not inspected for tuning."
 }

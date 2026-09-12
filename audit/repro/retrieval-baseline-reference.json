@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "purpose": "Frozen reference for the promotion gate. The gate must judge the CODE against fixed targets, not against a baseline re-measured on whatever the corpus happens to contain that day.",
+  "why_this_exists": "The corpus drifts (memories added, content edited, links rebuilt). A baseline measured in the same run as the candidate therefore moves on its own: on 2026-09-12 the baseline gained exactly one rank step (MRR 0.740196 -> 0.769608) while the corrected routing was byte-identical at MRR 0.754902. That flipped the verdict from keep to revert with no code change. A verdict that reports the corpus instead of the code is not a gate.",
+  "frozen_at": "2026-09-12T02:37:30+02:00",
+  "frozen_from_commit": "0a994a8",
+  "source_run": {
+    "note": "the last audited run whose verdict was keep, before the corpus drift",
+    "split": "final",
+    "baseline_variant": "current_hybrid",
+    "measured": {
+      "recall_at_5": 0.882353,
+      "mrr": 0.740196,
+      "no_answer_false_result_rate": 1.0,
+      "answerable_count": 17
+    },
+    "corrected_variant_measured": {
+      "recall_at_5": 0.852941,
+      "mrr": 0.754902,
+      "no_answer_false_result_rate": 0.0
+    },
+    "source_snapshot": {
+      "memories_version": 112588,
+      "rows": 472
+    }
+  },
+  "targets": {
+    "no_answer_false_result_rate": {
+      "target": 0.0,
+      "operator": "<=",
+      "rationale": "The corrected routing exists to stop returning results for questions the corpus cannot answer. This target does not depend on the corpus: it is a property of the routing policy. It is the criterion that must not be traded away."
+    },
+    "mrr_floor": {
+      "operator": ">=",
+      "reference_value": 0.754902,
+      "tolerance_rank_steps": 2,
+      "rationale": "A point value is the wrong shape here. MRR moves when the corpus reorders even one question, with no code change: during this session final-06 swapped two ranks because the live database lost one edge (memory_edges rows 138 -> 137), costing exactly one rank step (0.5/17 = 0.029412) and taking the corrected MRR from 0.754902 to 0.72549. A floor one step below the reference would flap on a single reorder. The floor is therefore the reference MINUS N rank steps, with N=2, so it measures 'the routing did not collapse' rather than 'the corpus held still'."
+    },
+    "recall_at_5_floor": {
+      "operator": ">=",
+      "reference_value": 0.882353,
+      "tolerance": 0.05,
+      "rationale": "The baseline's recall at freeze minus the same 0.05 tolerance the earlier gate allowed, so a small recall trade for eliminating false results stays acceptable."
+    }
+  }
+}

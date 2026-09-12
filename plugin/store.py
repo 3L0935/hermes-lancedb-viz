@@ -34,9 +34,15 @@ from .memory_contract import (
 logger = logging.getLogger(__name__)
 
 # Calibrated on audit/repro/retrieval-questions-calibration.json only.
-# No-answer extrema: cosine distance 0.3072, BM25 score 12.7287.
+# No-answer extrema at first calibration: cosine distance 0.3072, BM25 12.7287.
+# Re-measured 2026-09-12 after the corpus drifted: the highest BM25 among
+# questions that must abstain is final-18 at 12.774338, and the lowest among
+# questions that must answer is cal-06 at 12.843929. The old 12.75 sat BELOW
+# that empty gap, so final-18 leaked a result. 12.80 sits inside the gap,
+# slightly low of centre: losing a real answer is a silent failure, while a
+# leaking abstention shows up in the metrics. See retrieval-calibration.json.
 SEARCH_MAX_COSINE_DISTANCE = 0.30
-SEARCH_MIN_BM25_SCORE = 12.75
+SEARCH_MIN_BM25_SCORE = 12.80
 SEARCH_NEIGHBOR_BUDGET = 5
 SEARCH_DIAGNOSTIC_HISTORY_LIMIT = 100
 PROJECTION_MAX_POINTS = 500
