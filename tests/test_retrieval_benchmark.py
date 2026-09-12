@@ -145,6 +145,87 @@ class RetrievalBenchmarkTests(unittest.TestCase):
         self.assertTrue(decision["corrected_hybrid"]["promoted"])
         self.assertFalse(decision["corrected_one_hop_as_default"]["promoted"])
 
+    def test_decision_reports_how_many_questions_could_flip_the_verdict(self):
+        """The verdict must expose its margin, not just its conclusion.
+
+        The baseline is measured in the same run on a fixture copied from the
+        live database, so the comparison is relative and a single memory can
+        invert the verdict. A run that does not report the margin lets that
+        happen silently.
+        """
+        benchmark = load_benchmark_module()
+        dataset = {"questions": [{
+            "id": "critical", "category": "old_critical_correction",
+            "expected_ids": ["critical-id"],
+        }]}
+        results = {"splits": {"final": {
+            "current_hybrid": {
+                "metrics": {
+                    "recall_at_5": 0.88, "mrr": 0.74,
+                    "no_answer_false_result_rate": 1.0, "answerable_count": 17,
+                },
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+            "corrected_hybrid": {
+                # MRR is BELOW the baseline: one question moved.
+                "metrics": {
+                    "recall_at_5": 0.85, "mrr": 0.725,
+                    "no_answer_false_result_rate": 0.0, "answerable_count": 17,
+                },
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+            "corrected_one_hop": {
+                "metrics": {
+                    "recall_at_5": 0.85, "mrr": 0.725,
+                    "no_answer_false_result_rate": 0.0, "answerable_count": 17,
+                },
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+        }}}
+
+        decision = benchmark.promotion_decision(results, dataset)
+        margin = decision["margin"]
+
+        self.assertFalse(decision["corrected_hybrid"]["promoted"])
+        self.assertLess(margin["mrr_gap"], 0)
+        self.assertGreaterEqual(margin["single_question_steps_to_flip_mrr"], 1)
+        self.assertTrue(margin["hinges_on_a_single_question"])
+
+    def test_margin_reports_no_flip_needed_when_mrr_is_ahead(self):
+        benchmark = load_benchmark_module()
+        dataset = {"questions": [{
+            "id": "critical", "category": "old_critical_correction",
+            "expected_ids": ["critical-id"],
+        }]}
+        results = {"splits": {"final": {
+            "current_hybrid": {
+                "metrics": {
+                    "recall_at_5": 0.88, "mrr": 0.74,
+                    "no_answer_false_result_rate": 1.0, "answerable_count": 17,
+                },
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+            "corrected_hybrid": {
+                "metrics": {
+                    "recall_at_5": 0.85, "mrr": 0.75,
+                    "no_answer_false_result_rate": 0.0, "answerable_count": 17,
+                },
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+            "corrected_one_hop": {
+                "metrics": {
+                    "recall_at_5": 0.85, "mrr": 0.75,
+                    "no_answer_false_result_rate": 0.0, "answerable_count": 17,
+                },
+                "observations": [{"question_id": "critical", "result_ids": ["critical-id"]}],
+            },
+        }}}
+
+        margin = benchmark.promotion_decision(results, dataset)["margin"]
+
+        self.assertEqual(0, margin["single_question_steps_to_flip_mrr"])
+        self.assertFalse(margin["hinges_on_a_single_question"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -94,6 +94,39 @@ class MemoryEmbeddingError(RuntimeError):
 
 EMBED_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434") + "/api/embed"
 EMBED_MODEL = os.environ.get("LANCE_EMBED_MODEL", "nomic-embed-text")
+# Embedding dimension of the default model; recorded as pipeline metadata so a
+# vector written by a different model can be detected instead of silently mixed.
+EMBED_DIMENSION = int(os.environ.get("LANCE_EMBED_DIMENSION", "768"))
+# Pipeline metadata version. Bump when the embedding pipeline changes shape
+# (model, dimension, or the way text is prepared before the call).
+EMBED_PIPELINE_VERSION = int(os.environ.get("LANCE_EMBED_PIPELINE_VERSION", "1"))
+
+
+def embedding_pipeline() -> dict[str, Any]:
+    """Describe the embedding pipeline actually in use, read at call time.
+
+    `initialize` writes LANCE_EMBED_MODEL after the module may already have been
+    imported, so a module-level constant silently ignored the configured model.
+    Reading the environment here keeps the reported metadata and the value sent
+    to Ollama in agreement.
+
+    Nomic task prefixes (search_query / search_document) are deliberately NOT
+    applied: the Ollama model's own template is `{{ .Prompt }}`, with no task
+    instruction slot, so prefixes would be sent as literal text into the
+    embedding. Verified against the installed model, not assumed from the
+    upstream card.
+    """
+    return {
+        "model": os.environ.get("LANCE_EMBED_MODEL", EMBED_MODEL),
+        "dimension": int(os.environ.get("LANCE_EMBED_DIMENSION", str(EMBED_DIMENSION))),
+        "version": int(os.environ.get("LANCE_EMBED_PIPELINE_VERSION", str(EMBED_PIPELINE_VERSION))),
+        "task_prefixes": "not_applied",
+    }
+
+
+def current_embed_model() -> str:
+    """Resolve the model to call right now, not at import time."""
+    return embedding_pipeline()["model"]
 
 # Regex patterns that disqualify an entity/tag — paths, key=value, special chars, etc
 _TAG_REJECT_PATTERNS = [
@@ -1163,7 +1196,7 @@ class LanceDBStore:
         try:
             resp = httpx.post(
                 EMBED_URL,
-                json={"model": EMBED_MODEL, "input": [text], "keep_alive": "30s"},
+                json={"model": current_embed_model(), "input": [text], "keep_alive": "30s"},
                 timeout=30,
             )
             resp.raise_for_status()

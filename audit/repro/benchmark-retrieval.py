@@ -238,6 +238,65 @@ def evaluate_variant(store, questions: list[dict[str, Any]], variant: str) -> di
     return {"metrics": compute_metrics(questions, observations), "observations": observations}
 
 
+def corpus_versions(fixture_path: Path) -> dict[str, Any]:
+    """Read the table versions of the fixture actually being evaluated."""
+    import lancedb
+
+    try:
+        database = lancedb.connect(str(fixture_path))
+        versions = {}
+        rows = {}
+        for table_name in TABLES:
+            try:
+                table = database.open_table(table_name)
+            except Exception:
+                continue
+            versions[table_name] = table.version
+            rows[table_name] = table.count_rows()
+        return {"versions": versions, "rows": rows}
+    except Exception as error:
+        return {"error": f"{type(error).__name__}: {error}"}
+
+
+def decision_margin(results: dict[str, Any]) -> dict[str, Any]:
+    """Measure how close the frozen verdict is to flipping.
+
+    The gate compares corrected routing against a baseline measured in the same
+    run, on a fixture copied from the live database. The comparison is therefore
+    relative, and one memory changing content can move a single question's rank
+    and invert the verdict with no code change at all. Reporting the margin in
+    single-question units makes that fragility visible instead of letting the
+    verdict flip silently between runs.
+    """
+    variants = results["splits"]["final"]
+    corrected = variants["corrected_hybrid"]
+    current = variants["current_hybrid"]
+    cm = current["metrics"]
+    hm = corrected["metrics"]
+
+    # Mean-MRR contribution of moving ONE answerable question one rank up.
+    # compute_metrics averages reciprocal ranks over the answerable questions.
+    answerable = max(int(hm.get("answerable_count") or 0), 1)
+    one_step = round((1.0 / 1.0 - 1.0 / 2.0) / answerable, 6)
+
+    mrr_gap = round(hm["mrr"] - cm["mrr"], 6)
+    false_result_gap = round(
+        cm["no_answer_false_result_rate"] - hm["no_answer_false_result_rate"], 6
+    )
+    recall_slack = round(hm["recall_at_5"] - cm["recall_at_5"] + 0.05, 6)
+
+    steps_needed = 0 if mrr_gap >= 0 else (int(abs(mrr_gap) / one_step) + 1 if one_step else -1)
+
+    return {
+        "mrr_gap": mrr_gap,
+        "no_answer_false_result_rate_gap": false_result_gap,
+        "recall_at_5_slack_above_floor": recall_slack,
+        "single_question_rank_step": one_step,
+        "single_question_steps_to_flip_mrr": steps_needed,
+        "hinges_on_a_single_question": bool(0 < steps_needed <= 1),
+    }
+
+
 def promotion_decision(results: dict[str, Any], final_dataset: dict[str, Any]) -> dict[str, Any]:
     """Apply the frozen, auditable gate to final-split metrics only."""
     variants = results["splits"]["final"]
@@ -286,6 +345,7 @@ def promotion_decision(results: dict[str, Any], final_dataset: dict[str, Any]) -
     )
     return {
         "basis": "frozen final split only",
+        "margin": decision_margin(results),
         "corrected_hybrid": {
             "promoted": hybrid_promoted,
             "recall_at_5_delta": round(recall_delta, 6),
@@ -326,6 +386,10 @@ def run_benchmark(fixture_path: Path, datasets: list[dict[str, Any]]) -> dict[st
             },
         },
         "fixture": str(fixture_path.resolve()),
+        # Record the corpus the fixture was copied from. Without this the run is
+        # not reproducible: the fixture is a copy of the live database, so a later
+        # rerun can compare against different content and flip the verdict.
+        "corpus_versions": corpus_versions(fixture_path),
         "splits": {},
     }
     for dataset in datasets:

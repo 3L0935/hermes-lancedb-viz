@@ -618,6 +618,41 @@ class VizRetentionTests(unittest.TestCase):
                     f"{requirements} must declare {package}",
                 )
 
+    def test_configured_embed_model_is_not_ignored_after_import(self):
+        """F14: the configured model must reach Ollama, not a frozen constant.
+
+        `initialize` writes LANCE_EMBED_MODEL after plugin.store may already be
+        imported, so a module-level constant silently kept the default model.
+        """
+        import os
+        from plugin.store import embedding_pipeline, current_embed_model
+
+        original = os.environ.get("LANCE_EMBED_MODEL")
+        try:
+            os.environ["LANCE_EMBED_MODEL"] = "another-embed-model"
+            self.assertEqual("another-embed-model", current_embed_model())
+            self.assertEqual("another-embed-model", embedding_pipeline()["model"])
+        finally:
+            if original is None:
+                os.environ.pop("LANCE_EMBED_MODEL", None)
+            else:
+                os.environ["LANCE_EMBED_MODEL"] = original
+
+    def test_pipeline_metadata_is_explicit_about_task_prefixes(self):
+        """F14: report the pipeline, and state that Nomic prefixes are not applied.
+
+        The installed Ollama model's template is `{{ .Prompt }}` with no task
+        instruction slot, so prefixes would be embedded as literal text.
+        """
+        from plugin.store import embedding_pipeline
+
+        pipeline = embedding_pipeline()
+
+        self.assertEqual("not_applied", pipeline["task_prefixes"])
+        self.assertIsInstance(pipeline["dimension"], int)
+        self.assertIsInstance(pipeline["version"], int)
+        self.assertTrue(pipeline["model"])
+
     def test_diagnostics_tolerate_both_lancedb_stats_shapes(self):
         """0.30.2 returns dicts and hides FTS counts behind index_stats()."""
         from server.maintenance import _stat_value, _fragment_count, _fts_index_stats
