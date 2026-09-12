@@ -328,12 +328,14 @@ def _compute_stats_fast() -> dict:
 
     # Project before materialization so the large vector column is never read.
     arrow = store._table.search().select([
+        "id",
         "category",
         "type",
         "content",
         "created_at",
         "access_count",
         "entities",
+        "links",
         "tags",
         "quality",
     ]).to_arrow()
@@ -441,11 +443,37 @@ def _compute_stats_fast() -> dict:
 
     db_size = store.db_size
 
+    # Real edge counts. The header used to show only the edges of the loaded
+    # sub-graph, so a fresh page read "Edges 0" on a database that has hundreds.
+    # Declared = typed relations in memory_edges; semantic = auto-derived
+    # entity-overlap links stored on the rows themselves (counted as unordered
+    # pairs: a link listed on both sides is one edge).
+    try:
+        declared_edges = len(store.get_typed_edges(include_unresolved=True))
+    except Exception:
+        declared_edges = None
+    semantic_pairs = set()
+    links_col = arrow.column("links") if "links" in arrow.schema.names else None
+    if links_col is not None:
+        row_ids = arrow.column("id") if "id" in arrow.schema.names else None
+        for i in range(n):
+            raw_links = links_col[i].as_py()
+            if isinstance(raw_links, str):
+                try:
+                    raw_links = _json.loads(raw_links)
+                except (ValueError, TypeError):
+                    raw_links = []
+            source = str(row_ids[i].as_py()) if row_ids is not None else str(i)
+            for target in (raw_links or []):
+                semantic_pairs.add(tuple(sorted((source, str(target)))))
+
     # Shared result — both get_stats and api_get_dashboard use this
     return {
         "_shared": True,
         "total_memories": n,
         "total_entities": len(total_entities),
+        "total_edges": declared_edges,
+        "total_semantic_edges": len(semantic_pairs),
         "categories": categories,
         "types": types,
         "tiers": tiers,
@@ -1001,6 +1029,10 @@ def get_stats() -> dict:
         return {
             "total_memories": shared["total_memories"],
             "total_entities": shared["total_entities"],
+            # Global edge counts. Without these the header showed only the loaded
+            # sub-graph's edges, i.e. 0 on a freshly opened page.
+            "total_edges": shared.get("total_edges"),
+            "total_semantic_edges": shared.get("total_semantic_edges"),
             "categories": shared["categories"],
             "types": shared["types"],
             "tiers": shared["tiers"],

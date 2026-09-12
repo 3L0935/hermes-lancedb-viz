@@ -71,13 +71,22 @@ function renderGraph() {
   fetch('/api/stats').then(r => r.json()).then(stats => {
     if (stats.total_memories != null) setEl('mem-count', stats.total_memories);
     if (stats.total_entities != null) setEl('ent-count', stats.total_entities);
+    if (stats.total_edges != null) setEl('edge-count', stats.total_edges);
     if (stats.db_size_mb != null) setEl('db-size', stats.db_size_mb + ' MB');
   }).catch(() => {});
 
-  setEl('mem-count', allData.nodes?.length || 0);
-  setEl('ent-count', countEntities(allData.nodes));
-  const totalEdges = (allData.edges?.length || 0);
-  setEl('edge-count', totalEdges);
+  // Global counts come from /api/stats (applied by the fetch above). The loaded
+  // sub-graph is a different number and must not overwrite it: on a fresh page
+  // there is no selection, so allData.nodes/edges are empty and the header read
+  // "Memories 0 / Entities 0 / Edges 0" on a database holding hundreds.
+  const subGraphNodes = allData.nodes?.length || 0;
+  const subGraphEdges = allData.edges?.length || 0;
+  const subGraphLabel = document.getElementById('subgraph-count');
+  if (subGraphLabel) {
+    subGraphLabel.textContent = selectedNodeId
+      ? `Neighborhood ${subGraphNodes} nodes / ${subGraphEdges} edges`
+      : '';
+  }
   setEl('hidden-neighbor-count', (allData.hidden_neighbor_count || 0) + ' hidden by budget · ' + (allData.hidden_by_relation_filter || 0) + ' hidden by relation filter');
   const fleg = document.getElementById('fresh-legend');
   if (fleg) fleg.style.display = 'flex';
