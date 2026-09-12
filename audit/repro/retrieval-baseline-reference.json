@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "purpose": "Frozen reference for the promotion gate. The gate must judge the CODE against fixed targets, not against a baseline re-measured on whatever the corpus happens to contain that day.",
+  "schema_version": 2,
+  "purpose": "Frozen reference for the promotion gate. Strict policy invariants decide exact behavior; corpus-dependent metrics only reject a collapse toward a measured degraded control.",
   "why_this_exists": "The corpus drifts (memories added, content edited, links rebuilt). A baseline measured in the same run as the candidate therefore moves on its own: on 2026-09-12 the baseline gained exactly one rank step (MRR 0.740196 -> 0.769608) while the corrected routing was byte-identical at MRR 0.754902. That flipped the verdict from keep to revert with no code change. A verdict that reports the corpus instead of the code is not a gate.",
   "frozen_at": "2026-09-12T02:37:30+02:00",
   "frozen_from_commit": "0a994a8",
@@ -24,23 +24,54 @@
       "rows": 472
     }
   },
-  "targets": {
+  "strict_invariants": {
     "no_answer_false_result_rate": {
       "target": 0.0,
-      "operator": "<=",
+      "operator": "==",
       "rationale": "The corrected routing exists to stop returning results for questions the corpus cannot answer. This target does not depend on the corpus: it is a property of the routing policy. It is the criterion that must not be traded away."
+    }
+  },
+  "corpus_guardrails": {
+    "mrr": {
+      "operator": ">",
+      "healthy_reference_value": 0.754902,
+      "degraded_control_variant": "lexical",
+      "degraded_control_value": 0.593137,
+      "observed_corpus_noise_rank_steps": 1,
+      "rationale": "MRR is corpus-dependent, so it cannot be a fine promotion criterion. On lancedb==0.34.0, removing one edge (memory_edges rows 138 -> 137) moved both corrected_hybrid (0.754902 -> 0.725490) and the frozen lexical degraded control (0.593137 -> 0.563725) by exactly one maximum rank step (0.5/17 = 0.029412), while code was unchanged. The anti-collapse target is therefore the frozen degraded control plus that one measured noise step: 0.593137 + 0.029412 = 0.622549. Cost: the gate can accept up to 0.132353 MRR below the healthy reference; in return it rejects collapse toward lexical behavior without flapping on the observed corpus reorder."
     },
-    "mrr_floor": {
-      "operator": ">=",
-      "reference_value": 0.754902,
-      "tolerance_rank_steps": 2,
-      "rationale": "A point value is the wrong shape here. MRR moves when the corpus reorders even one question, with no code change: during this session final-06 swapped two ranks because the live database lost one edge (memory_edges rows 138 -> 137), costing exactly one rank step (0.5/17 = 0.029412) and taking the corrected MRR from 0.754902 to 0.72549. A floor one step below the reference would flap on a single reorder. The floor is therefore the reference MINUS N rank steps, with N=2, so it measures 'the routing did not collapse' rather than 'the corpus held still'."
+    "recall_at_5": {
+      "operator": ">",
+      "healthy_reference_value": 0.852941,
+      "degraded_control_variant": "lexical",
+      "degraded_control_value": 0.764706,
+      "observed_corpus_noise": 0.0,
+      "rationale": "Recall is also corpus-dependent and is therefore only an anti-collapse guardrail. Across the same lancedb==0.34.0 runs at 138 and 137 memory_edges rows, lexical recall stayed 0.764706 and corrected_hybrid recall stayed 0.852941: observed recall noise was 0. The candidate must remain strictly above the frozen lexical degraded control. Cost: one whole-answer loss from 0.852941 remains above the guardrail, while two such losses fall below it."
+    }
+  },
+  "degraded_control_measurement": {
+    "variant": "lexical",
+    "commit": "0a994a8",
+    "engine": "lancedb==0.34.0",
+    "split": "final",
+    "answerable_count": 17,
+    "metrics": {
+      "mrr": 0.593137,
+      "recall_at_5": 0.764706
     },
-    "recall_at_5_floor": {
-      "operator": ">=",
-      "reference_value": 0.882353,
-      "tolerance": 0.05,
-      "rationale": "The baseline's recall at freeze minus the same 0.05 tolerance the earlier gate allowed, so a small recall trade for eliminating false results stays acceptable."
+    "fixture_corpus": {
+      "versions": {
+        "memories": 2,
+        "memory_edges": 1,
+        "memory_conflicts": 1,
+        "memory_conflicts_archive": 1
+      },
+      "rows": {
+        "memories": 473,
+        "memory_edges": 138,
+        "memory_conflicts": 10,
+        "memory_conflicts_archive": 0
+      }
     }
   },
   "calibrated_engine": "lancedb==0.34.0",

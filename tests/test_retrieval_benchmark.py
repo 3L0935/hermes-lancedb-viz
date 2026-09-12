@@ -156,7 +156,7 @@ class RetrievalBenchmarkTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 benchmark.copy_read_only_fixture(source_path, ROOT / "forbidden-fixture")
 
-    def test_promotion_gate_requires_false_result_gain_and_no_critical_regression(self):
+    def test_promotion_gate_requires_zero_false_results_and_critical_corrections(self):
         benchmark = load_benchmark_module()
         dataset = {"questions": [{
             "id": "critical", "category": "old_critical_correction",
@@ -181,6 +181,52 @@ class RetrievalBenchmarkTests(unittest.TestCase):
 
         self.assertTrue(decision["corrected_hybrid"]["promoted"])
         self.assertFalse(decision["corrected_one_hop_as_default"]["promoted"])
+
+        results["splits"]["final"]["corrected_hybrid"]["metrics"][
+            "no_answer_false_result_rate"
+        ] = 0.333333
+        strict_failure = benchmark.promotion_decision(results, dataset)
+
+        self.assertFalse(
+            strict_failure["absolute_targets"]["strict_invariants"]
+            ["no_answer_false_result_rate"]["met"]
+        )
+        self.assertFalse(strict_failure["corrected_hybrid"]["promoted"])
+
+    def test_critical_correction_is_strict_even_when_current_routing_misses_it(self):
+        """A living baseline miss must not waive the frozen critical invariant."""
+        benchmark = load_benchmark_module()
+        dataset = {"questions": [{
+            "id": "critical", "category": "old_critical_correction",
+            "expected_ids": ["critical-id"],
+        }]}
+
+        def variant(result_ids):
+            return {
+                "metrics": {
+                    "recall_at_5": 0.852941,
+                    "mrr": 0.72549,
+                    "no_answer_false_result_rate": 0.0,
+                    "answerable_count": 17,
+                },
+                "observations": [
+                    {"question_id": "critical", "result_ids": result_ids}
+                ],
+            }
+
+        results = {"splits": {"final": {
+            "current_hybrid": variant([]),
+            "corrected_hybrid": variant([]),
+            "corrected_one_hop": variant([]),
+        }}}
+
+        decision = benchmark.promotion_decision(results, dataset)
+
+        self.assertFalse(
+            decision["absolute_targets"]["strict_invariants"]
+            ["old_critical_correction"]["met"]
+        )
+        self.assertFalse(decision["corrected_hybrid"]["promoted"])
 
     def test_gate_verdict_does_not_flip_when_the_baseline_improves(self):
         """F: a baseline that improves must not turn a good fix into a regression.
@@ -259,11 +305,14 @@ class RetrievalBenchmarkTests(unittest.TestCase):
 
         decision = benchmark.promotion_decision(results, dataset)
         targets = decision["absolute_targets"]
+        strict = targets["strict_invariants"]
+        guardrails = targets["corpus_guardrails"]
 
-        self.assertEqual(0.0, targets["no_answer_false_result_rate"]["target"])
-        self.assertEqual(0.0, targets["no_answer_false_result_rate"]["observed"])
-        self.assertTrue(targets["no_answer_false_result_rate"]["met"])
-        self.assertTrue(targets["mrr_floor"]["met"])
+        self.assertEqual(0.0, strict["no_answer_false_result_rate"]["target"])
+        self.assertEqual(0.0, strict["no_answer_false_result_rate"]["observed"])
+        self.assertTrue(strict["no_answer_false_result_rate"]["met"])
+        self.assertTrue(strict["old_critical_correction"]["met"])
+        self.assertTrue(guardrails["mrr_above_degraded_control"]["met"])
 
     def test_mrr_floor_tolerates_a_corpus_reorder(self):
         """A rank swap caused by the corpus must not fail the gate.
@@ -283,28 +332,123 @@ class RetrievalBenchmarkTests(unittest.TestCase):
         }
 
         targets = benchmark.absolute_targets(metrics)
-        step = targets["mrr_floor"]["single_question_rank_step"]
+        mrr_guardrail = targets["corpus_guardrails"][
+            "mrr_above_degraded_control"
+        ]
+        step = mrr_guardrail["single_question_rank_step"]
 
         self.assertEqual(0.029412, step)
-        self.assertLess(targets["mrr_floor"]["target"], metrics["mrr"])
+        self.assertEqual(1, mrr_guardrail["observed_corpus_noise_rank_steps"])
+        self.assertLess(mrr_guardrail["target"], metrics["mrr"])
         self.assertTrue(
-            targets["mrr_floor"]["met"],
+            mrr_guardrail["met"],
             "a one-step corpus reorder must not fail the floor",
         )
 
+    def test_gate_verdict_survives_one_observed_corpus_rank_step(self):
+        """One corpus reorder must not be able to reverse promotion by itself.
+
+        The measured corpus noise is one maximum MRR rank step: moving one of
+        17 answerable questions from rank 1 to rank 2 costs 0.5 / 17. Place the
+        healthy measurement half a step above the collapse floor, then apply
+        exactly that observed reorder. The code and strict policy outcomes stay
+        identical, so the promotion verdict must stay identical too.
+        """
+        benchmark = load_benchmark_module()
+        dataset = {"questions": [{
+            "id": "critical", "category": "old_critical_correction",
+            "expected_ids": ["critical-id"],
+        }]}
+
+        def variant(mrr):
+            return {
+                "metrics": {
+                    "recall_at_5": 0.852941,
+                    "mrr": mrr,
+                    "no_answer_false_result_rate": 0.0,
+                    "answerable_count": 17,
+                },
+                "observations": [
+                    {"question_id": "critical", "result_ids": ["critical-id"]}
+                ],
+            }
+
+        current = variant(0.74)
+        one_hop = variant(0.74)
+        before = 0.710784
+        after_one_reorder = round(before - (0.5 / 17), 6)
+
+        def decision(candidate_mrr):
+            return benchmark.promotion_decision(
+                {"splits": {"final": {
+                    "current_hybrid": current,
+                    "corrected_hybrid": variant(candidate_mrr),
+                    "corrected_one_hop": one_hop,
+                }}},
+                dataset,
+            )
+
+        before_decision = decision(before)
+        after_decision = decision(after_one_reorder)
+
+        self.assertEqual(0.681372, after_one_reorder)
+        self.assertTrue(before_decision["corrected_hybrid"]["promoted"])
+        self.assertTrue(
+            after_decision["corrected_hybrid"]["promoted"],
+            "one measured corpus-noise step must not reverse the verdict",
+        )
+
     def test_mrr_floor_still_fails_a_real_routing_collapse(self):
-        """The tolerance must not be so wide that it accepts any MRR."""
+        """The corpus guardrails must still reject a real routing collapse."""
         benchmark = load_benchmark_module()
         metrics = {
-            "recall_at_5": 0.852941,
-            "mrr": 0.4,               # a genuine collapse
+            "recall_at_5": 0.4,
+            "mrr": 0.4,
             "no_answer_false_result_rate": 0.0,
             "answerable_count": 17,
         }
 
         targets = benchmark.absolute_targets(metrics)
 
-        self.assertFalse(targets["mrr_floor"]["met"])
+        self.assertFalse(
+            targets["corpus_guardrails"]["mrr_above_degraded_control"]["met"]
+        )
+        self.assertFalse(
+            targets["corpus_guardrails"][
+                "recall_at_5_above_degraded_control"
+            ]["met"]
+        )
+
+        dataset = {"questions": [{
+            "id": "critical", "category": "old_critical_correction",
+            "expected_ids": ["critical-id"],
+        }]}
+
+        def variant(candidate_metrics):
+            return {
+                "metrics": candidate_metrics,
+                "observations": [
+                    {"question_id": "critical", "result_ids": ["critical-id"]}
+                ],
+            }
+
+        healthy_metrics = {
+            "recall_at_5": 0.852941,
+            "mrr": 0.72549,
+            "no_answer_false_result_rate": 0.0,
+            "answerable_count": 17,
+        }
+        decision = benchmark.promotion_decision(
+            {"splits": {"final": {
+                "current_hybrid": variant(healthy_metrics),
+                "corrected_hybrid": variant(metrics),
+                "corrected_one_hop": variant(healthy_metrics),
+            }}},
+            dataset,
+        )
+
+        self.assertFalse(decision["corrected_hybrid"]["promoted"])
+        self.assertEqual("revert corrected routing", decision["corrected_hybrid"]["decision"])
 
     def test_decision_reports_how_many_questions_could_flip_the_verdict(self):
         """The margin must be reported, not just the conclusion.

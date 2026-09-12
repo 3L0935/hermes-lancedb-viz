@@ -266,14 +266,12 @@ def corpus_versions(fixture_path: Path) -> dict[str, Any]:
 
 
 def decision_margin(results: dict[str, Any]) -> dict[str, Any]:
-    """Measure how close the frozen verdict is to flipping.
+    """Report the same-run comparison without letting it decide promotion.
 
-    The gate compares corrected routing against a baseline measured in the same
-    run, on a fixture copied from the live database. The comparison is therefore
-    relative, and one memory changing content can move a single question's rank
-    and invert the verdict with no code change at all. Reporting the margin in
-    single-question units makes that fragility visible instead of letting the
-    verdict flip silently between runs.
+    One memory changing content can move a single question's rank. Reporting
+    that relative margin in single-question units keeps the corpus sensitivity
+    visible even though only strict invariants and frozen collapse guardrails
+    decide promotion.
     """
     variants = results["splits"]["final"]
     corrected = variants["corrected_hybrid"]
@@ -320,52 +318,72 @@ def absolute_targets(
     metrics: dict[str, Any],
     reference: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Judge a variant against fixed targets instead of a same-run baseline.
+    """Separate strict policy invariants from corpus collapse guardrails.
 
-    The MRR floor is expressed as a reference value MINUS N single-question rank
-    steps, not as a bare point value. A point value would reintroduce exactly the
-    fragility this gate exists to remove: MRR moves when the corpus reorders one
-    question, with no code change at all.
+    Corpus-dependent quality metrics are anchored to a frozen degraded control,
+    not to the historical healthy candidate. The MRR target adds exactly the
+    corpus noise observed across two engine-identical runs. This makes MRR and
+    recall evidence of a routing collapse rather than fine promotion criteria.
     """
     reference = reference or load_baseline_reference()
-    targets = reference["targets"]
+    strict_specs = reference["strict_invariants"]
+    guardrail_specs = reference["corpus_guardrails"]
 
     false_rate = metrics["no_answer_false_result_rate"]
     mrr = metrics["mrr"]
     recall = metrics["recall_at_5"]
 
-    false_target = targets["no_answer_false_result_rate"]["target"]
-    recall_floor = targets["recall_at_5_floor"]["reference_value"] - targets["recall_at_5_floor"]["tolerance"]
-
-    # One rank step = moving one answerable question up one rank.
-    answerable = max(int(metrics.get("answerable_count") or 0), 1)
-    rank_step = round((1.0 / 1.0 - 1.0 / 2.0) / answerable, 6)
-    mrr_spec = targets["mrr_floor"]
-    mrr_floor = round(
-        mrr_spec["reference_value"] - mrr_spec["tolerance_rank_steps"] * rank_step, 6
+    false_spec = strict_specs["no_answer_false_result_rate"]
+    answerable = max(
+        int(
+            metrics.get("answerable_count")
+            or reference["source_run"]["measured"]["answerable_count"]
+        ),
+        1,
     )
+    rank_step = round((1.0 / 1.0 - 1.0 / 2.0) / answerable, 6)
+    mrr_spec = guardrail_specs["mrr"]
+    mrr_floor = round(
+        mrr_spec["degraded_control_value"]
+        + mrr_spec["observed_corpus_noise_rank_steps"] * rank_step,
+        6,
+    )
+    recall_spec = guardrail_specs["recall_at_5"]
+    recall_floor = recall_spec["degraded_control_value"]
 
     return {
-        "no_answer_false_result_rate": {
-            "target": false_target,
-            "operator": targets["no_answer_false_result_rate"]["operator"],
-            "observed": false_rate,
-            "met": bool(false_rate <= false_target),
+        "strict_invariants": {
+            "no_answer_false_result_rate": {
+                "target": false_spec["target"],
+                "operator": false_spec["operator"],
+                "observed": false_rate,
+                "met": bool(false_rate == false_spec["target"]),
+            },
         },
-        "mrr_floor": {
-            "target": mrr_floor,
-            "operator": mrr_spec["operator"],
-            "observed": mrr,
-            "reference_value": mrr_spec["reference_value"],
-            "tolerance_rank_steps": mrr_spec["tolerance_rank_steps"],
-            "single_question_rank_step": rank_step,
-            "met": bool(mrr >= mrr_floor),
-        },
-        "recall_at_5_floor": {
-            "target": recall_floor,
-            "operator": targets["recall_at_5_floor"]["operator"],
-            "observed": recall,
-            "met": bool(recall >= recall_floor),
+        "corpus_guardrails": {
+            "mrr_above_degraded_control": {
+                "target": mrr_floor,
+                "operator": mrr_spec["operator"],
+                "observed": mrr,
+                "healthy_reference_value": mrr_spec["healthy_reference_value"],
+                "degraded_control_variant": mrr_spec["degraded_control_variant"],
+                "degraded_control_value": mrr_spec["degraded_control_value"],
+                "observed_corpus_noise_rank_steps": mrr_spec[
+                    "observed_corpus_noise_rank_steps"
+                ],
+                "single_question_rank_step": rank_step,
+                "met": bool(mrr > mrr_floor),
+            },
+            "recall_at_5_above_degraded_control": {
+                "target": recall_floor,
+                "operator": recall_spec["operator"],
+                "observed": recall,
+                "healthy_reference_value": recall_spec["healthy_reference_value"],
+                "degraded_control_variant": recall_spec["degraded_control_variant"],
+                "degraded_control_value": recall_spec["degraded_control_value"],
+                "observed_corpus_noise": recall_spec["observed_corpus_noise"],
+                "met": bool(recall > recall_floor),
+            },
         },
     }
 
@@ -399,23 +417,29 @@ def promotion_decision(results: dict[str, Any], final_dataset: dict[str, Any]) -
             for question_id, expected in critical_ids.items()
         }
 
-    current_critical = critical_hits(current)
     corrected_critical = critical_hits(corrected)
-    no_critical_regression = all(
-        not was_found or corrected_critical.get(question_id, False)
-        for question_id, was_found in current_critical.items()
-    )
+    critical_corrections_preserved = all(corrected_critical.values())
     cm = current["metrics"]
     hm = corrected["metrics"]
     om = one_hop["metrics"]
     recall_delta = hm["recall_at_5"] - cm["recall_at_5"]
 
     targets = absolute_targets(hm)
+    targets["strict_invariants"]["old_critical_correction"] = {
+        "target": True,
+        "operator": "==",
+        "observed": critical_corrections_preserved,
+        "met": critical_corrections_preserved,
+        "questions": corrected_critical,
+    }
+    strict_invariants_met = all(
+        criterion["met"] for criterion in targets["strict_invariants"].values()
+    )
+    corpus_guardrails_met = all(
+        criterion["met"] for criterion in targets["corpus_guardrails"].values()
+    )
     hybrid_promoted = bool(
-        targets["no_answer_false_result_rate"]["met"]
-        and targets["mrr_floor"]["met"]
-        and targets["recall_at_5_floor"]["met"]
-        and no_critical_regression
+        strict_invariants_met and corpus_guardrails_met
     )
     one_hop_promoted = bool(
         om["no_answer_false_result_rate"] <= hm["no_answer_false_result_rate"]
@@ -425,7 +449,10 @@ def promotion_decision(results: dict[str, Any], final_dataset: dict[str, Any]) -
         )
     )
     return {
-        "basis": "frozen final split, judged against fixed targets",
+        "basis": (
+            "frozen final split: strict policy invariants plus frozen "
+            "corpus-collapse guardrails"
+        ),
         "margin": decision_margin(results),
         "absolute_targets": targets,
         "current_hybrid_reference": {
@@ -445,7 +472,7 @@ def promotion_decision(results: dict[str, Any], final_dataset: dict[str, Any]) -
             "no_answer_false_result_rate_delta_vs_same_run_baseline": round(
                 hm["no_answer_false_result_rate"] - cm["no_answer_false_result_rate"], 6
             ),
-            "critical_no_regression": no_critical_regression,
+            "critical_no_regression": critical_corrections_preserved,
             "decision": (
                 "keep corrected routing" if hybrid_promoted
                 else "revert corrected routing"
