@@ -596,6 +596,28 @@ class VizRetentionTests(unittest.TestCase):
         self.assertIn("projection_failed", app)
         self.assertIn("PROJECTION_MAX_POINTS = 500", store_source)
 
+    def test_container_requirements_cover_every_runtime_import(self):
+        """The deployed image must ship what the imported store actually needs.
+
+        server.py imports LanceDBStore, whose embedding path does `import httpx`.
+        The container image was built from a requirements file without httpx or
+        scikit-learn, so /api/search failed with "No module named 'httpx'" in
+        production while every unit test passed on the host venv.
+        """
+        required = {"httpx", "scikit-learn"}
+        for requirements in (
+            ROOT / "requirements.txt",
+            Path("/home/elo/github/hermes-hub/services/lancedb-viz/requirements.txt"),
+        ):
+            if not requirements.exists():
+                continue
+            text = requirements.read_text()
+            for package in required:
+                self.assertIn(
+                    package, text,
+                    f"{requirements} must declare {package}",
+                )
+
     def test_diagnostics_tolerate_both_lancedb_stats_shapes(self):
         """0.30.2 returns dicts and hides FTS counts behind index_stats()."""
         from server.maintenance import _stat_value, _fragment_count, _fts_index_stats

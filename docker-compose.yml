@@ -7,8 +7,12 @@ services:
     ports:
       - "127.0.0.1:7777:7777"
     environment:
-      - OLLAMA_HOST=http://host.docker.internal:11434
+      # Ollama binds 127.0.0.1 only; use ollama-container-relay.service on the host
+      # (socat 172.17.0.1:11435 -> 127.0.0.1:11434). Port 11435, not 11434.
+      - OLLAMA_HOST=http://host.docker.internal:11435
       - HERMES_HOME=/home/hermes/.hermes
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       # LanceDB data (rw — viz writes access counts, projections)
       - ~/.hermes/lancedb:/home/hermes/.hermes/lancedb:rw
