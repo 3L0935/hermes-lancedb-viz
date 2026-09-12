@@ -46,10 +46,23 @@ venv/bin/python -c "from plugins.memory.lancedb import LanceDBMemoryProvider; pr
 
 ### Visualizer (server/ + static/)
 
-The viz runs in Docker with bind-mounts. After changes:
+The canonical viz runs in the Hub-managed Docker container on port 7777. Start
+or recreate it from `~/github/hermes-hub/services/lancedb-viz/` with
+`docker compose up -d`. Synchronize repository changes with:
+
+```bash
+./scripts/deploy-local.sh --dry-run
+./scripts/deploy-local.sh
+```
+
+After changes:
 
 - `static/` files (HTML/CSS/JS): instant, just refresh the browser
-- `server/server.py`: `docker restart lancedb-viz`
+- `server/server.py` or `server/maintenance.py`: the deploy script restarts `lancedb-viz`
+- `plugin/`: restart `hermes-gateway` separately; the deploy script cannot reload an imported Python module
+
+The disabled systemd service on port 7778 is a recovery fallback, not the
+normal contributor deployment.
 
 ### Frontend pitfalls
 
@@ -77,10 +90,12 @@ Types: fix, feat, refactor, docs, chore
 
 ## Before pushing
 
-1. `docker restart lancedb-viz` — verify the viz still loads
-2. `curl -s http://localhost:7777/api/stats | python3 -m json.tool` — API responds
-3. `./scripts/verify-setup.sh` — smoke test passes
-4. No personal references (paths, usernames, project names) in docs or code comments
+1. `./scripts/deploy-local.sh --dry-run` — inspect the exact sync/restart actions
+2. `./scripts/deploy-local.sh` — synchronize and restart the canonical container
+3. `systemctl --user restart hermes-gateway.service` — required when `plugin/` changed
+4. `curl -s http://localhost:7777/api/stats | python3 -m json.tool` — API responds
+5. `./scripts/verify-setup.sh` — smoke test passes
+6. No personal references (paths, usernames, project names) in docs or code comments
 
 ## License
 

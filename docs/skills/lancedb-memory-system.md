@@ -1,7 +1,7 @@
 ---
 name: lancedb-memory-system
 description: "Architecture LanceDB locale — store, viz, scripts. Pas de format ici (voir memory-writing)."
-version: 5.0.0
+version: 5.1.0
 triggers:
   - "lancedb memory"
   - "vector memory"
@@ -25,9 +25,9 @@ Architecture et déploiement du stockage vectoriel local.
 ~/.config/systemd/user/lancedb-viz.service      <- unit systemd (versionnee dans le repo)
 ```
 
-**Viz** : le conteneur Docker `lancedb-viz` sur le port 7777 est l'interface principale. L'unité systemd sur le port 7778 est un fallback optionnel.
-**Redémarrage** : le conteneur sert les fichiers du dépôt par bind mounts, mais le processus Python ne recharge pas `server.py` automatiquement. Redémarrer le conteneur après une modification du serveur ; les fichiers statiques n'en ont pas besoin.
-**Déploiement** : `./scripts/deploy-local.sh` synchronise les fichiers puis redémarre Docker par défaut. Utiliser `--systemd-fallback` pour cibler l'unité sur le port 7778.
+**Viz** : le conteneur Docker `lancedb-viz` sur `127.0.0.1:7777` est canonique (décision du 10/09/2026). Il est piloté par `~/github/hermes-hub/services/lancedb-viz/docker-compose.yaml`, utilise l'image `lancedb-viz:local` et le réseau externe `hub-services`. L'unité systemd sur 7778 est un secours désactivé.
+**Redémarrage viz** : les bind mounts chargent `server.py`, `maintenance.py` et `static/` depuis `~/.hermes/lancedb-viz/`, mais Python ne recharge pas le serveur tout seul. Redémarrer le conteneur après une modification Python ; les fichiers statiques sont relus à chaque requête.
+**Déploiement** : `docker compose up -d` depuis le service Hub gère le conteneur. `./scripts/deploy-local.sh` synchronise repo, plugin canonique, copie runtime et viz, puis redémarre le conteneur existant. Il ne redémarre pas `hermes-gateway` : après un changement plugin, redémarrer le gateway séparément pour recharger les modules importés.
 **Store** : plugin memory du repo Hermes — `memory.provider: lancedb` dans config.yaml.
 **Frontend** : SPA 10 pages en vanilla JS dans `static/`. Liste paginee (20/page), timeline, tags, duplicates, conflicts, embedding scatter plot, clusters, stale, graph (vis-network).
 
@@ -61,12 +61,22 @@ Le store.py definit ces champs dans `_get_schema()` :
 
 Le store.py avait une methode `_migrate_table()` qui utilisait `rename_table()` — **cassée sur LanceDB OSS** (NotImplementedError). Le code a ete simplifie pour juste logger un warning si les colonnes manquent. La migration DOIT etre faite manuellement via le pattern dans `references/schema-migration-recovery.md`.
 
-## Viz (localhost:7778)
+## Viz canonique (localhost:7777)
 
-**Deploy = systemd user unit depuis le 06/09/2026 (Docker/7777 historique).**
-`lancedb-viz.service` : `%h/.hermes/lancedb-viz/server.py --port 7778`, host 127.0.0.1.
-Sync + restart : `./scripts/deploy-local.sh` depuis le repo (dry-run d'abord). Restart seul : `systemctl --user restart lancedb-viz`.
-Unit versionnée dans le repo : `systemd/lancedb-viz.service`.
+Le déploiement normal est le conteneur Docker du Hub :
+
+```bash
+cd ~/github/hermes-hub/services/lancedb-viz
+docker compose up -d
+cd ~/github/hermes-lancedb-viz
+./scripts/deploy-local.sh --dry-run
+./scripts/deploy-local.sh
+```
+
+Le service monte `~/.hermes/lancedb-viz/server.py`, `maintenance.py` et
+`static/`, ainsi que la base et le dossier des backups de compaction. L'unité
+versionnée `systemd/lancedb-viz.service` écoute sur 7778 mais reste désactivée ;
+`./scripts/deploy-local.sh --systemd-fallback` ne sert qu'à un recovery explicite.
 
 ### Frontend : architecture multi-fichiers (juin 2026)
 Le viz est un **SPA vanilla JS** reparti sur **4 fichiers séparés** sous `~/.hermes/lancedb-viz/static/` :
@@ -146,19 +156,26 @@ Le frontend a des defenses (unwrapping) pour gerer les deux formats en transit, 
 - `GET /api/clusters?threshold=0.6&min_size=2` — clusters semantiques
 - `GET /api/stale?days=90&quality_max=0.3` — memories vieilles + low quality
 - `GET /api/conflicts?status=&memory_id=&limit=` — registre des contradictions (plat, comme les autres handlers)
+- `GET /api/search?q=&top_k=&diagnostics=1` — recherche routée et diagnostics d'abstention/engine
+- `GET /api/health` — diagnostics read-only tables, FTS, Ollama et pipeline
+- `GET /api/review` — inbox de review bornée et read-only
+- `GET /api/typed-edges` — relations typées persistées
+- `GET /api/maintenance/compact/plan` — plan read-only, backup et rétention
 - `POST /api/memories/:id` — update content, category, tags, quality, type
 - `POST /api/memories/:id/access` — increment access count
+- `POST /api/memories/:id/preview` — validation/rendu sans écriture
 - `GET /api/refresh` — reset le singleton store + invalide le cache stats. Appelé par le bouton ↻ dans l'UI. Réponse `{"status": "ok"}`.
 - `POST /api/memories/bulk-delete` — `{memory_ids: [...]}`
 - `POST /api/memories/bulk-tag` — `{memory_ids, add_tags, remove_tags}`
 - `POST /api/memories/bulk-type` — `{memory_ids, type}`
 - `POST /api/tags/rename`, `delete`, `merge`
+- `POST /api/maintenance/compact` — compaction confirmée avec backup préalable et vérification
 
 **Redemarrer le service / Refresh**
 ```bash
-systemctl --user restart lancedb-viz
+docker restart lancedb-viz
 ```
-Le fichier unit est versionné dans le repo (`systemd/lancedb-viz.service`) et installé par `scripts/deploy-local.sh`. Les fichiers sont déployés par install — les changements server.py nécessitent le restart, le HTML/JS est servi à chaque requête.
+Le conteneur 7777 est le service canonique. Le fichier unit est toujours versionné dans le repo et installé par `scripts/deploy-local.sh`, mais uniquement comme fallback 7778 désactivé.
 
 **Alternative sans restart :** bouton **↻** dans la topbar de l'UI (ou `curl http://localhost:7777/api/refresh`). Reset le store singleton et recharge la page active. Fonctionne pour toutes les pages sauf les changements au code serveur (server.py) qui nécessitent un restart.
 
@@ -226,15 +243,38 @@ Détection DÉTERMINISTE au add/update de content, zéro LLM : catégories decis
 
 `search(mode="auto")` route localement sans LLM : lexical (guillemets, UUID, chemins, marqueurs exact), graph (related/depends/linked/... → hybrid seed ≤5 + traversal 1-hop des edges target_id, budget total = top_k, champ `relation_type` + `retrieval_source` sur les résultats), hybrid par défaut. `relation_depth=0` désactive le traversal. Modes explicites `lexical|hybrid|graph` disponibles côté tool.
 
-**Deploy standard (09/2026) :** `./scripts/deploy-local.sh --dry-run` puis sans flag depuis le repo — sync canonique (`~/.hermes/plugins/lancedb/`) + runtime + viz + unit systemd (port 7778). Ne redémarre PAS le gateway (systemd-run séparé ou /restart).
+**Deploy standard (09/2026) :** le conteneur 7777 est géré depuis `~/github/hermes-hub/services/lancedb-viz/` avec `docker compose up -d`. Depuis le repo viz, lancer `./scripts/deploy-local.sh --dry-run` puis sans flag pour synchroniser le plugin canonique, la copie runtime et les bind mounts. Le script redémarre le conteneur mais PAS `hermes-gateway` ; un changement plugin exige donc un restart gateway séparé, sinon l'ancien module Python reste chargé silencieusement.
 
 ## FTS (BM25) + Hybrid Search — ACTIVÉ (2026-06-12)
 
 LanceDB supporte nativement le full-text search via Tantivy (BM25) et la fusion RRF. **Activé dans store.py.**
 
-### Precision Gate (2026-06-22)
+### Abstention et gate de rétention (mis à jour 12/09/2026)
 
-Le search() filtre maintenant les résultats avec un score RRF < 0.005. Les scores hybrides RRF sont typiquement 0.015-0.035 — en dessous de 0.005 c'est du bruit évident. Le gate empêche le small talk de pull du noise quand rien n'est réellement pertinent.
+Le RRF sert uniquement au classement. Un candidat hybride est retenu si son
+score BM25 est `>= SEARCH_MIN_BM25_SCORE` (`12.80`) **ou** si sa distance cosine
+est `<= SEARCH_MAX_COSINE_DISTANCE` (`0.30`). Si aucun candidat ne franchit un
+seuil, la recherche s'abstient (`abstained=true`, `below_calibrated_evidence`).
+
+Le score BM25 dépend de la version du moteur : mêmes lignes, même requête et
+même code ont donné `12.774338` avec `lancedb==0.34.0` et `14.397717` avec
+0.38.0. Le pin `lancedb==0.34.0` doit rester aligné dans le repo, le venv hôte
+et l'image Hub. Avec `diagnostics=1`, vérifier `calibrated_engine`,
+`running_engine` et `matches` avant d'interpréter un score.
+
+Le harnais `audit/repro/benchmark-retrieval.py` copie la base read-only vers
+`/tmp`. Le split final exige strictement zéro faux résultat sur les questions
+sans réponse et la présence de chaque `old_critical_correction`. MRR et recall,
+dépendants du corpus, ne servent que de garde-fous anti-effondrement contre le
+contrôle lexical gelé ; le delta du baseline vivant reste informatif. Les
+cibles, le bruit mesuré, leur coût et l'engine sont dans
+`audit/repro/retrieval-baseline-reference.json`.
+
+La maintenance est manuelle : `GET /api/maintenance/compact/plan` ne modifie
+rien ; `POST /api/maintenance/compact` exige `{"confirmed": true}`. L'apply
+publie atomiquement un backup `lancedb-pre-compact-*` avant la compaction,
+retient les deux derniers backups gérés et vérifie chaque table. Un échec expose
+`failed_step` et, si créé, `backup_created` pour le recovery.
 
 ## lancedb_update tool (2026-06-22)
 
@@ -252,7 +292,7 @@ Nouvel outil MCP exposé au plugin : `lancedb_update`. Permet d'éditer une mém
 **Quand NE PAS utiliser :** Pour une nouvelle info -> `lancedb_add`. Pour supprimer -> `lancedb_delete`.
 **Comportement :** `store.update(memory_id, **kwargs)` fait le re-embed + re-extract entities + re-write relations. Retourne la mémoire mise à jour.
 
-### API LanceDB 0.33.0
+### API LanceDB 0.34.0
 
 ```python
 tbl.create_fts_index("content", replace=True)              # Idempotent, auto dans _init_table()
@@ -642,7 +682,7 @@ PYEOF
 1. **Canonique = `~/.hermes/plugins/lancedb/`** (dir user, survit aux updates, scan par la discovery memory-provider comme fallback bundled). Sync depuis `~/github/hermes-lancedb-viz/plugin/`.
 2. **Copie runtime `plugins/memory/lancedb/`** = bundled-first (precedence), mais fragile. Restaurer après wipe : `cp ~/github/hermes-lancedb-viz/plugin/{store.py,__init__.py,plugin.yaml} ~/.hermes/hermes-agent/plugins/memory/lancedb/`.
 3. **server.py viz : `_import_store_module()`** importe le store canonique-first (spec_from_file_location, sys.modules cache), runtime en fallback. 3 call sites patchés (`_get_store`, graph guard, `_STOP_ENTITIES`).
-4. **Viz = systemd, PAS Docker** : `lancedb-viz.service` (user unit), port **7778**, `~/.hermes/lancedb-viz/server.py`. Restart : `systemctl --user restart lancedb-viz`. Les sections Docker/7777 ci-dessous sont historiques.
+4. **Viz = Docker via le Hub** : conteneur `lancedb-viz`, port **7777**, bind mounts depuis `~/.hermes/lancedb-viz/`. Restart : `docker restart lancedb-viz`. L'unité systemd 7778 est uniquement un secours désactivé.
 
 **Validation fallback (testée) :** runtime renommé → `load_memory_provider('lancedb')` charge depuis le dir user → `initialize(session_id=...)` → store OK → `lancedb_list` 426 résultats, search OK. Le provider survit donc aux wipes.
 
@@ -772,7 +812,7 @@ Le JS original de `renderGraph()` (lignes ~1356-1522) référence des éléments
 - **Warning `lance is not fork-safe`** : harmless, supprime via `warnings.filterwarnings(ignore)` dans store.py avant import lancedb. Voir `references/lance-fork-warning-suppression.md`.
 - **Schema mismatch on reconstruction** : quand on reconstruit store.py contre une table existante, le schema doit matcher exactement — noms, types, ordre. `_get_schema()` sert seulement a la creation. Pas de champ `metadata`. `access_count` est `int64` pas `int32`. Symptome: `ValueError: Invalid input, field X does not exist in table schema` sur `tbl.add()`.
 - **Ollama unreachable from Docker** : le conteneur viz (lancedb-viz:local) ne peut pas joindre Ollama sur `localhost:11434` du host. `_embed()` retourne zero vector silencieusement. Inoffensif — l'embedding est fait cote host par le plugin Hermes. Pour du debug depuis le conteneur, utiliser `OLLAMA_HOST=http://host.docker.internal:11434`.
-- **`_parse_relations()` premier match vs dernier** : le marqueur `::relations::` apparait parfois dans le texte (ex: "store.py parse ::relations:: au write"). La regex `re.search()` trouve le premier match = faux positif dans le contenu. **Fix:** `list(re.finditer(...))[-1]` pour prendre le dernier occurrence — celui apres `[Tier=N]` qui est le vrai marqueur. Symptome: relations parasites avec des labels absurdes parsees depuis le corps du texte.\n- **Deps manquantes dans le venv** : si `lancedb` + `pyarrow` ne sont pas installes dans `~/.hermes/hermes-agent/venv/`, le plugin `LanceDBMemoryProvider` ne crash PAS — il s'initialise silencieusement avec `self._store = None`. Tous les tools (`lancedb_search`, `lancedb_add`, `lancedb_graph`) renvoient `'NoneType' object has no attribute 'search/add/graph'`. Pas de trace dans les logs car le constructeur ne lance pas d'exception. **Symptome :** tools disponibles (schemas charges), mais erreur `NoneType` sur chaque appel. **Diagnostic:** `cd ~/.hermes/hermes-agent && venv/bin/python -c "import lancedb; import pyarrow; print('OK')"` — si le module manque, le pip list montre leur absence. **Fix :** `cd ~/.hermes/hermes-agent && uv pip install lancedb pyarrow`, puis restart du gateway. Les 212+ memoires existantes ne sont pas perdues — le store les retrouve automatiquement.\n- **Import manquant dans `__init__.py`** : `from .store import LanceDBStore` peut disparaitre (rebased, cherry-pick, etc.). Meme symptome que les deps manquantes — provider s'initialise avec `self._store = None`, tools renvoient `NoneType`. **Diagnostic:** log agent `WARNING agent.memory_manager: provider 'lancedb' initialize failed: name 'LanceDBStore' is not defined`. **Fix:** re-ajouter l'import et restart gateway. Verification avec `cd ~/.hermes/hermes-agent && venv/bin/python -c "from plugins.memory.lancedb import LanceDBMemoryProvider; print('OK')"`.\n- **Category invalide pas filtree** : le schema enum a 5 categories (`project|tech|fact|correction|user_pref`) mais seul le LLM le respecte — aucune validation backend dans `_handle_add()`. Une categorie orpheline comme `"architecture"` passe, donne 0 entites, 0 liens, jamais matchée par les searches filtrées. **Fix:** fallback a `"fact"` dans `_handle_add()` si category pas dans `VALID_CATEGORIES`.\n- **Entity noise — keywords ≤2 chars** : `c`, `ts`, `js`, `rg`, `fd`, `sh`, `go` dans `_TECH_KEYWORDS` matchent en substring (`if kw in lower`). Dec 2026-06-07: `c` matche dans tout texte contenant la lettre c (100% des textes francais), `ts` matche dans "statuts", "contents", etc. 30 memoires polluees, 935 entites noise, ~329 faux liens. **Fix:** `len(kw) < 3: continue` dans `store.py:extract_entities()`. Apres fix: re-extract entities sur toutes les memoires + rebuild links + re-embed complet avec nomic.\n- **Stale browser cache faussant les couleurs** : si l'utilisateur signale "cette memoire est pas de la bonne couleur" alors que la DB a deja la bonne categorie, faire Ctrl+F5 (hard refresh). Le serveur sert `Cache-Control: no-cache` mais les navigateurs peuvent render des donnees stale du cache memoire.
+- **`_parse_relations()` premier match vs dernier** : le marqueur `::relations::` apparait parfois dans le texte (ex: "store.py parse ::relations:: au write"). La regex `re.search()` trouve le premier match = faux positif dans le contenu. **Fix:** `list(re.finditer(...))[-1]` pour prendre le dernier occurrence — celui apres `[Tier=N]` qui est le vrai marqueur. Symptome: relations parasites avec des labels absurdes parsees depuis le corps du texte.\n- **Deps manquantes dans le venv** : si `lancedb` + `pyarrow` ne sont pas installes dans `~/.hermes/hermes-agent/venv/`, le plugin `LanceDBMemoryProvider` ne crash PAS — il s'initialise silencieusement avec `self._store = None`. Tous les tools (`lancedb_search`, `lancedb_add`, `lancedb_graph`) renvoient `'NoneType' object has no attribute 'search/add/graph'`. Pas de trace dans les logs car le constructeur ne lance pas d'exception. **Symptome :** tools disponibles (schemas charges), mais erreur `NoneType` sur chaque appel. **Diagnostic:** `cd ~/.hermes/hermes-agent && venv/bin/python -c "import lancedb; import pyarrow; print('OK')"` — si le module manque, le pip list montre leur absence. **Fix :** `cd ~/.hermes/hermes-agent && venv/bin/pip install -r ~/github/hermes-lancedb-viz/requirements.txt`, puis restart du gateway. Les 212+ memoires existantes ne sont pas perdues — le store les retrouve automatiquement.\n- **Import manquant dans `__init__.py`** : `from .store import LanceDBStore` peut disparaitre (rebased, cherry-pick, etc.). Meme symptome que les deps manquantes — provider s'initialise avec `self._store = None`, tools renvoient `NoneType`. **Diagnostic:** log agent `WARNING agent.memory_manager: provider 'lancedb' initialize failed: name 'LanceDBStore' is not defined`. **Fix:** re-ajouter l'import et restart gateway. Verification avec `cd ~/.hermes/hermes-agent && venv/bin/python -c "from plugins.memory.lancedb import LanceDBMemoryProvider; print('OK')"`.\n- **Category invalide pas filtree** : le schema enum a 5 categories (`project|tech|fact|correction|user_pref`) mais seul le LLM le respecte — aucune validation backend dans `_handle_add()`. Une categorie orpheline comme `"architecture"` passe, donne 0 entites, 0 liens, jamais matchée par les searches filtrées. **Fix:** fallback a `"fact"` dans `_handle_add()` si category pas dans `VALID_CATEGORIES`.\n- **Entity noise — keywords ≤2 chars** : `c`, `ts`, `js`, `rg`, `fd`, `sh`, `go` dans `_TECH_KEYWORDS` matchent en substring (`if kw in lower`). Dec 2026-06-07: `c` matche dans tout texte contenant la lettre c (100% des textes francais), `ts` matche dans "statuts", "contents", etc. 30 memoires polluees, 935 entites noise, ~329 faux liens. **Fix:** `len(kw) < 3: continue` dans `store.py:extract_entities()`. Apres fix: re-extract entities sur toutes les memoires + rebuild links + re-embed complet avec nomic.\n- **Stale browser cache faussant les couleurs** : si l'utilisateur signale "cette memoire est pas de la bonne couleur" alors que la DB a deja la bonne categorie, faire Ctrl+F5 (hard refresh). Le serveur sert `Cache-Control: no-cache` mais les navigateurs peuvent render des donnees stale du cache memoire.
 
 ### Pitfall: Empty manifests (0 bytes) — `Invalid range 0..0 for object of size 0 bytes`
 
@@ -797,7 +837,7 @@ Les manifests sont nommes en u64 decroissant: `18446744073709551615 - version_nu
 4. `docker restart lancedb-viz`
 5. Restart le gateway Hermes (le provider a cache store=None et ne retry pas)
 
-## Recovery — Plugin files wiped, graph shows empty/no data (Docker legacy; workflow actuel = deploy-local.sh)
+## Recovery — Plugin files wiped, graph shows empty/no data (Docker 7777)
 
 **Symptom:** Docker container up (healthy), DB present in `~/.hermes/lancedb/memories.lance/`, but `/api/stats` and `/api/graph` return `{"error": "LanceDB plugin not found"}` with 0 nodes/edges.
 
@@ -805,7 +845,7 @@ Les manifests sont nommes en u64 decroissant: `18446744073709551615 - version_nu
 
 **Diagnosis:**
 - Check docker is really up: `docker ps --filter name=lancedb-viz`
-- Check the API returns an error (not empty data): `curl -s http://localhost:7778/api/graph | python3 -c "import sys,json; d=json.load(sys.stdin); print('error:', d.get('error','none'))"`
+- Check the API returns an error (not empty data): `curl -s http://localhost:7777/api/stats | python3 -c "import sys,json; d=json.load(sys.stdin); print('error:', d.get('error','none'))"`
 - List plugin files: `ls -la ~/.hermes/hermes-agent/plugins/memory/lancedb/`
 - Check viz logs: `docker logs lancedb-viz --tail 20`
 - Check other memory plugins for collateral damage: `for d in ~/.hermes/hermes-agent/plugins/memory/*/; do name=$(basename "$d"); count=$(ls -A "$d" 2>/dev/null | wc -l); [ "$count" = "0" ] && echo "EMPTY: $name"; done`
@@ -854,8 +894,8 @@ from plugins.memory.lancedb import LanceDBMemoryProvider
 print('OK')
 "
 docker restart lancedb-viz
-curl -s http://localhost:7778/api/stats | python3 -m json.tool
-curl -s http://localhost:7778/api/graph | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'nodes={len(d.get("nodes",[]))} edges={len(d.get("edges",[]))}')"
+curl -s http://localhost:7777/api/stats | python3 -m json.tool
+curl -s http://localhost:7777/api/health | python3 -m json.tool
 ```
 
 ## Format des entrees

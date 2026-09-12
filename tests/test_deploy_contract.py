@@ -43,6 +43,23 @@ class DeployContractTests(unittest.TestCase):
         self.assertIn("$BASE_URL/api/typed-edges", script)
         self.assertNotIn("$BASE_URL/api/graph?cluster=raw", script)
 
+    def test_setup_and_memory_system_skill_match_the_canonical_deployment(self):
+        setup = (ROOT / "docs" / "setup.md").read_text()
+        skill = (ROOT / "docs" / "skills" / "lancedb-memory-system.md").read_text()
+
+        for document in (setup, skill):
+            self.assertIn("lancedb==0.34.0", document)
+            self.assertIn("hermes-hub/services/lancedb-viz", document)
+            self.assertIn("hermes-gateway", document)
+            self.assertIn("benchmark-retrieval.py", document)
+            self.assertIn("/api/maintenance/compact", document)
+
+        self.assertIn("SEARCH_MIN_BM25_SCORE", skill)
+        self.assertIn("SEARCH_MAX_COSINE_DISTANCE", skill)
+        self.assertNotIn("## Viz (localhost:7778)", skill)
+        self.assertNotIn("API LanceDB 0.33.0", skill)
+        self.assertNotIn("uv pip install lancedb pyarrow", skill)
+
 
 if __name__ == "__main__":
     unittest.main()
