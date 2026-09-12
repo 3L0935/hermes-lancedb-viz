@@ -27,8 +27,11 @@ from plugins.memory.lancedb.store import LanceDBStore, MemoryPatch
 
 def find_duplicate_groups(store: LanceDBStore, threshold: float = 0.92) -> list[list[dict]]:
     """Find groups of duplicate memories by vector similarity.
+
     Returns list of groups, each group is a list of raw memory dicts.
-    Uses connected components like get_duplicates() but returns full data.
+    Groups are transitive connected components: if A~B and B~C, they belong to
+    the same group even when A!~C. Walking only the neighbours of the first
+    element split such chains into separate groups and hid duplicates.
     """
     raw = store._get_all_raw()
     if len(raw) < 2:
@@ -54,22 +57,27 @@ def find_duplicate_groups(store: LanceDBStore, threshold: float = 0.92) -> list[
     sim_matrix = np.dot(vec_matrix, vec_matrix.T)
     n = len(mems)
 
-    # Connected components
+    # Transitive connected components (breadth-first over the full adjacency).
     visited = set()
     groups = []
-    for i in range(n):
-        if i in visited:
+    for start in range(n):
+        if start in visited:
             continue
-        group = [i]
-        visited.add(i)
-        for j in range(i + 1, n):
-            if j in visited:
-                continue
-            if float(sim_matrix[i][j]) >= threshold:
-                group.append(j)
-                visited.add(j)
-        if len(group) >= 2:
-            groups.append([mems[idx] for idx in group])
+        visited.add(start)
+        component = [start]
+        frontier = [start]
+        while frontier:
+            node = frontier.pop()
+            neighbours = np.flatnonzero(sim_matrix[node] >= threshold)
+            for candidate in neighbours:
+                index = int(candidate)
+                if index in visited:
+                    continue
+                visited.add(index)
+                component.append(index)
+                frontier.append(index)
+        if len(component) >= 2:
+            groups.append([mems[idx] for idx in component])
 
     return groups
 
@@ -150,6 +158,151 @@ def merge_tags(keeper: dict, duplicates: list[dict]) -> list[str]:
     return sorted(all_tags)
 
 
+def resolve_memory_patch(store: LanceDBStore):
+    """Return the MemoryPatch class belonging to THIS store's module.
+
+    `update_memory` checks `isinstance(patch, MemoryPatch)` against the class
+    bound inside the store's own module. The plugin ships twice
+    (plugin/store.py and plugins/memory/lancedb/store.py), each with its own
+    memory_contract copy, so importing MemoryPatch from one side while the store
+    comes from the other fails with "update_memory requires MemoryPatch".
+
+    Resolve through the method that will actually run, so proxies, subclasses
+    and delegating wrappers are followed instead of guessed from their type.
+    """
+    import importlib
+
+    def _from_module(module_name):
+        module = sys.modules.get(module_name)
+        if module is None:
+            try:
+                module = importlib.import_module(module_name)
+            except Exception:
+                return None
+        candidate = getattr(module, "MemoryPatch", None)
+        if candidate is not None:
+            return candidate
+        # flat module that only imported the symbol
+        for attribute in vars(module).values():
+            if getattr(attribute, "__name__", "") == "MemoryPatch":
+                return attribute
+        parent = module_name.rsplit(".", 1)[0]
+        if parent != module_name:
+            return _from_module(parent + ".memory_contract")
+        return None
+
+    method = getattr(store, "update_memory", None)
+    function = getattr(method, "__func__", method)
+    module_name = getattr(function, "__module__", None) or type(store).__module__
+    resolved = _from_module(module_name)
+    return resolved if resolved is not None else MemoryPatch
+
+
+def incoming_relation_sources(store: LanceDBStore, target_ids: list[str]) -> dict[str, list[str]]:
+    """Map each target id to the ids of memories whose relations point at it.
+
+    `store.delete` only clears edges whose source_id or target_id IS the deleted
+    memory, so a relation held in ANOTHER memory's `relations` list dangles after
+    the target disappears. Read the live relations before deleting anything.
+    """
+    wanted = {str(item) for item in target_ids if item}
+    if not wanted:
+        return {}
+    sources: dict[str, list[str]] = {}
+    try:
+        memories = store.get_all()
+    except Exception:
+        # If we cannot read the relations, refuse to guess: report every target
+        # as referenced so the caller refuses the delete.
+        return {target: ["<unreadable>"] for target in wanted}
+    for memory in memories:
+        source_id = str(memory.get("id") or "")
+        relations = memory.get("relations") or []
+        if isinstance(relations, str):
+            try:
+                relations = json.loads(relations)
+            except Exception:
+                relations = []
+        for relation in relations:
+            if not isinstance(relation, dict):
+                continue
+            target_id = str(relation.get("target_id") or "").strip()
+            if target_id and target_id in wanted:
+                sources.setdefault(target_id, []).append(source_id)
+    return sources
+
+
+def remap_incoming_relations(
+    store: LanceDBStore,
+    source_ids: list[str],
+    old_target_id: str,
+    new_target_id: str,
+) -> tuple[list[str], list[str]]:
+    """Point every relation at the keeper instead of the duplicate.
+
+    Returns (remapped_source_ids, refused_source_ids). A source is refused when
+    its relations cannot be read or rewritten, so the caller can skip the delete
+    instead of leaving a dangling target behind.
+    """
+    remapped: list[str] = []
+    refused: list[str] = []
+    for source_id in source_ids:
+        try:
+            raw = store._get_by_id_raw(source_id)
+        except Exception as error:
+            print(f"    ! cannot read {source_id[:12]}...: {type(error).__name__}: {error}")
+            raw = None
+        if not raw:
+            refused.append(source_id)
+            continue
+        relations = raw.get("relations") or []
+        if isinstance(relations, str):
+            try:
+                relations = json.loads(relations)
+            except Exception as error:
+                print(f"    ! cannot parse relations of {source_id[:12]}...: {error}")
+                refused.append(source_id)
+                continue
+        rewritten = []
+        touched = False
+        for relation in relations:
+            if not isinstance(relation, dict):
+                continue
+            relation_type = relation.get("type")
+            target_id = str(relation.get("target_id") or "").strip()
+            target_label = relation.get("target")
+            if target_id == old_target_id:
+                # The contract accepts exactly one of target_id / target. Keep the
+                # authoritative pointer and drop the label: the store re-derives
+                # target_label from the new target's content.
+                rewritten.append({"type": relation_type, "target_id": new_target_id})
+                touched = True
+                continue
+            # Untouched relations must be normalised too: the stored rows carry
+            # BOTH target_id and target, and the contract rejects that shape.
+            if target_id:
+                rewritten.append({"type": relation_type, "target_id": target_id})
+            elif target_label:
+                rewritten.append({"type": relation_type, "target": target_label})
+        if not touched:
+            # The relation vanished between the scan and now; treat as refused so
+            # the caller re-evaluates rather than assuming a clean remap.
+            refused.append(source_id)
+            continue
+        try:
+            patch_class = resolve_memory_patch(store)
+            store.update_memory(patch_class.from_mapping({
+                "memory_id": source_id,
+                "relations": rewritten,
+            }))
+        except Exception as error:
+            print(f"    ! cannot rewrite {source_id[:12]}...: {type(error).__name__}: {error}")
+            refused.append(source_id)
+            continue
+        remapped.append(source_id)
+    return remapped, refused
+
+
 def run_merge(store: LanceDBStore, threshold: float, apply: bool = False) -> dict:
     """Run the auto-merge. Returns summary stats."""
     groups = find_duplicate_groups(store, threshold)
@@ -161,6 +314,7 @@ def run_merge(store: LanceDBStore, threshold: float, apply: bool = False) -> dic
         "merged": 0,
         "deleted": 0,
         "skipped": 0,
+        "relations_blocked": 0,
         "details": [],
     }
 
@@ -175,8 +329,6 @@ def run_merge(store: LanceDBStore, threshold: float, apply: bool = False) -> dic
         keeper = pick_best_entry(group)
         duplicates = [m for m in group if m["id"] != keeper["id"]]
 
-        stats["total_duplicates"] += len(duplicates)
-
         print(f"Group {i+1}/{len(groups)} ({len(group)} entries):")
         print(f"  KEEPER: {keeper['id'][:12]}... q={keeper.get('quality',0.5)} "
               f"access={keeper.get('access_count',0)} "
@@ -187,7 +339,7 @@ def run_merge(store: LanceDBStore, threshold: float, apply: bool = False) -> dic
             # Compute similarity to keeper
             keeper_vec = keeper.get("vector")
             dup_vec = dup.get("vector")
-            if keeper_vec and dup_vec:
+            if keeper_vec is not None and dup_vec is not None:
                 kv = np.array(keeper_vec, dtype=np.float32)
                 dv = np.array(dup_vec, dtype=np.float32)
                 kn = np.linalg.norm(kv)
@@ -210,10 +362,33 @@ def run_merge(store: LanceDBStore, threshold: float, apply: bool = False) -> dic
                 }))
                 print(f"  -> Merged tags: {merged_tags}")
 
-            # Delete duplicates
+            # Delete duplicates, but never silently drop a relation.
+            incoming = incoming_relation_sources(store, [d["id"] for d in duplicates])
             for dup in duplicates:
                 dup_content = dup.get("content", "")
                 keeper_content = keeper.get("content", "")
+
+                # Anyone pointing at this duplicate must be remapped or the delete
+                # must be refused; deleting first would leave a dangling target.
+                referencing = incoming.get(dup["id"], [])
+                if referencing:
+                    remapped, refused = remap_incoming_relations(
+                        store, referencing, dup["id"], keeper["id"]
+                    )
+                    if refused:
+                        stats["skipped"] += 1
+                        stats["relations_blocked"] += 1
+                        print(
+                            f"  -> SKIPPED {dup['id'][:12]}... "
+                            f"({len(refused)} relation(s) could not be remapped: "
+                            f"{', '.join(sorted(refused)[:3])})"
+                        )
+                        continue
+                    print(
+                        f"  -> REMAPPED {len(remapped)} relation(s) "
+                        f"-> keeper {keeper['id'][:12]}..."
+                    )
+
                 # Check if content is identical (modulo tier marker)
                 dup_clean = dup_content
                 keeper_clean = keeper_content
