@@ -1,4 +1,8 @@
-lancedb>=0.33.0
+# The retrieval gate (bm25 threshold / abstention) is calibrated against the
+# score produced by a SPECIFIC lancedb version: identical code and identical
+# rows score differently across versions. Pinned here so the container and the
+# host venv cannot drift apart and silently invalidate the calibration.
+lancedb==0.34.0
 numpy>=1.26.0
 pyarrow>=14.0.0
 pyyaml>=6.0

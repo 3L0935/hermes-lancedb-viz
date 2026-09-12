@@ -42,5 +42,7 @@
       "tolerance": 0.05,
       "rationale": "The baseline's recall at freeze minus the same 0.05 tolerance the earlier gate allowed, so a small recall trade for eliminating false results stays acceptable."
     }
-  }
+  },
+  "calibrated_engine": "lancedb==0.34.0",
+  "why_engine_is_recorded": "The BM25 scores these targets were measured on are engine-specific: the same rows and query scored 12.774 under lancedb 0.34.0 but 14.398 under 0.38.0. A target without its engine is not reproducible."
 }

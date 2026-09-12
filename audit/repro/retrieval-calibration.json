@@ -24,14 +24,29 @@
     "lowest_answerable_bm25": 12.843929,
     "lowest_answerable_question_id": "cal-06",
     "empty_gap_width": 0.069591,
-    "safe_window": [12.775, 12.84],
+    "safe_window": [
+      12.775,
+      12.84
+    ],
     "shipped": 12.8,
     "shipped_position": "inside the gap, low of centre: losing a real answer is a silent failure, a leaking abstention is visible in the metrics",
     "measured_effect": {
-      "at_12.75": {"recall_at_5": 0.882353, "no_answer_false_result_rate": 0.333333},
-      "at_12.78": {"recall_at_5": 0.882353, "no_answer_false_result_rate": 0.0},
-      "at_12.845_and_above": {"recall_at_5": 0.823529, "no_answer_false_result_rate": 0.0, "note": "cal-06 is lost"}
+      "at_12.75": {
+        "recall_at_5": 0.882353,
+        "no_answer_false_result_rate": 0.333333
+      },
+      "at_12.78": {
+        "recall_at_5": 0.882353,
+        "no_answer_false_result_rate": 0.0
+      },
+      "at_12.845_and_above": {
+        "recall_at_5": 0.823529,
+        "no_answer_false_result_rate": 0.0,
+        "note": "cal-06 is lost"
+      }
     }
   },
-  "decision": "A candidate must pass at least one interpretable threshold. Exact IDs and exact literal paths or key=value tokens bypass semantic scoring. Thresholds were selected on calibration only; the final split was frozen first and was not inspected for tuning."
+  "decision": "A candidate must pass at least one interpretable threshold. Exact IDs and exact literal paths or key=value tokens bypass semantic scoring. Thresholds were selected on calibration only; the final split was frozen first and was not inspected for tuning.",
+  "calibrated_engine": "lancedb==0.34.0",
+  "engine_note": "Thresholds are only valid for this engine. Measured 2026-09-12: identical code, rows and query scored final-18 at 12.774338 under 0.34.0 (abstains at 12.8) but 14.397717 under 0.38.0 (leaks). The container had drifted to 0.38.0 via a floating 'lancedb>=0.33.0' pin, which made the threshold a no-op in production without any source change."
 }

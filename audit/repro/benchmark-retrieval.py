@@ -239,9 +239,16 @@ def evaluate_variant(store, questions: list[dict[str, Any]], variant: str) -> di
 
 
 def corpus_versions(fixture_path: Path) -> dict[str, Any]:
-    """Read the table versions of the fixture actually being evaluated."""
+    """Read the table versions of the fixture actually being evaluated.
+
+    Also records the lancedb version, because the BM25 scores this gate measures
+    are engine-specific: identical rows scored 12.774 under 0.34.0 and 14.398
+    under 0.38.0 for the same query. Without the engine name a run is not
+    reproducible, and a threshold calibrated here would silently not hold there.
+    """
     import lancedb
 
+    engine = f"lancedb=={getattr(lancedb, '__version__', 'unknown')}"
     try:
         database = lancedb.connect(str(fixture_path))
         versions = {}
@@ -253,9 +260,9 @@ def corpus_versions(fixture_path: Path) -> dict[str, Any]:
                 continue
             versions[table_name] = table.version
             rows[table_name] = table.count_rows()
-        return {"versions": versions, "rows": rows}
+        return {"engine": engine, "versions": versions, "rows": rows}
     except Exception as error:
-        return {"error": f"{type(error).__name__}: {error}"}
+        return {"engine": engine, "error": f"{type(error).__name__}: {error}"}
 
 
 def decision_margin(results: dict[str, Any]) -> dict[str, Any]:

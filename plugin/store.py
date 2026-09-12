@@ -43,6 +43,14 @@ logger = logging.getLogger(__name__)
 # leaking abstention shows up in the metrics. See retrieval-calibration.json.
 SEARCH_MAX_COSINE_DISTANCE = 0.30
 SEARCH_MIN_BM25_SCORE = 12.80
+# The BM25 score is NOT a property of this code alone: identical code, identical
+# rows and identical query produce different scores under different lancedb
+# versions (measured 2026-09-12: final-18 scored 12.774 under 0.34.0 but 14.398
+# under 0.38.0). The threshold above is therefore only valid for the engine it
+# was calibrated on, and a silent engine drift would invalidate it without
+# changing a single line here. requirements.txt pins lancedb==0.34.0; this
+# constant names that engine so a mismatch is reportable instead of silent.
+SEARCH_CALIBRATED_ENGINE = "lancedb==0.34.0"
 SEARCH_NEIGHBOR_BUDGET = 5
 SEARCH_DIAGNOSTIC_HISTORY_LIMIT = 100
 PROJECTION_MAX_POINTS = 500
@@ -64,6 +72,35 @@ def _serialized_mutation(method):
         with self._mutation_lock:
             return method(self, *args, **kwargs)
     return wrapped
+
+
+def engine_version() -> str:
+    """Return the installed lancedb version, or 'unknown'.
+
+    Read at call time on purpose: the module-level constant would freeze the
+    value at import, which is exactly the drift this guards against.
+    """
+    try:
+        import lancedb
+        return f"lancedb=={lancedb.__version__}"
+    except Exception:  # pragma: no cover - defensive, import is the normal path
+        return "unknown"
+
+
+def engine_calibration_status() -> dict[str, Any]:
+    """Report whether the running engine matches the calibrated one.
+
+    The retrieval thresholds are engine-specific, so a mismatch means the
+    abstention gate is running on an uncalibrated score. This is reported, not
+    enforced: refusing to search would be worse than a wider gate.
+    """
+    running = engine_version()
+    calibrated = SEARCH_CALIBRATED_ENGINE
+    return {
+        "calibrated_engine": calibrated,
+        "running_engine": running,
+        "matches": running == calibrated,
+    }
 
 
 class MemoryEmbeddingError(RuntimeError):
@@ -2494,6 +2531,7 @@ class LanceDBStore:
                 "neighbor_budget": min(max(int(neighbor_budget), 0), SEARCH_NEIGHBOR_BUDGET),
                 "history_limit": SEARCH_DIAGNOSTIC_HISTORY_LIMIT,
                 "score_semantics": "rrf_rank_not_probability",
+                **engine_calibration_status(),
                 **relation_diagnostics,
             }
             self._search_diagnostics.append({
