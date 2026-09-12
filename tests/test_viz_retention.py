@@ -532,22 +532,56 @@ class VizRetentionTests(unittest.TestCase):
              "label": "0.90", "color": {"color": "#6366f1", "opacity": 0.5}}
             for index in range(119)
         ]
+        typed = [
+            {"from": nodes[0]["id"], "to": nodes[1]["id"], "relation_type": "depends"}
+        ]
+        store = SimpleNamespace(get_typed_edges=lambda include_unresolved=False: typed)
+
         with patch.object(server, "_compute_vector_data",
                           return_value=(nodes, edges, {}, None, [], 0.8)), \
-             patch.object(server, "_get_store", return_value=SimpleNamespace(
-                 get_typed_edges=lambda include_unresolved=False: [
-                     {"from": nodes[0]["id"], "to": nodes[1]["id"],
-                      "relation_type": "depends"}
-                 ])):
-            result = server.get_graph_data(threshold=0.8)
+             patch.object(server, "_get_store", return_value=store):
+            default_view = server.get_graph_data(threshold=0.8)
+            overlay_view = server.get_graph_data(threshold=0.8, show_declared=True)
 
-        self.assertFalse(result["selection_required"])
-        self.assertEqual(120, len(result["nodes"]))
-        self.assertEqual(120, result["total_edges"])
-        self.assertEqual(1, len(result["typed_edges"]))
-        self.assertTrue(all(edge.get("kind") for edge in result["edges"]))
-        self.assertEqual(["depends"], result["available_relation_types"])
-        self.assertLess(len(json.dumps(result)), 200_000)
+        self.assertFalse(default_view["selection_required"])
+        self.assertEqual(120, len(default_view["nodes"]))
+        self.assertTrue(all(edge["kind"] == "semantic" for edge in default_view["edges"]))
+        self.assertLess(len(json.dumps(default_view)), 200_000)
+
+        # Declared relations are an opt-in overlay, not part of the default view.
+        self.assertEqual(120, len(overlay_view["edges"]))
+        self.assertEqual(1, len(overlay_view["typed_edges"]))
+        self.assertEqual(["depends"], overlay_view["available_relation_types"])
+
+    def test_graph_default_uses_embedding_links_and_hub_modes_are_opt_in(self):
+        """The default layout is embedding similarity; hubs come from `cluster`.
+
+        Typed relations used to be drawn on every graph, which buried the
+        embedding structure the page exists to show.
+        """
+        nodes = [
+            {"id": f"b{index:010d}", "label": f"N{index}", "title": f"Fact {index}",
+             "category": "tech", "created_at": 0.0, "access_count": 0,
+             "entities": ["alpha"], "relations": [], "tier": "2"}
+            for index in range(5)
+        ]
+        raw = {"nodes": nodes, "edges": []}
+        hub = {"nodes": nodes + [{"id": "hub:cat_tech", "node_type": "hub",
+                                  "label": "Tech", "entities": ["tech"][:1]}],
+               "edges": [{"from": "hub:cat_tech", "to": nodes[0]["id"], "label": "domain"}]}
+        store = SimpleNamespace(get_typed_edges=lambda include_unresolved=False: [])
+
+        with patch.object(server, "_compute_vector_data",
+                          return_value=(nodes, [], {}, None, [], 0.8)), \
+             patch.object(server, "_build_category_hub_graph", return_value=hub), \
+             patch.object(server, "_get_store", return_value=store):
+            default_view = server.get_graph_data(threshold=0.8)
+            hub_view = server.get_graph_data(threshold=0.8, cluster="category_hub")
+
+        self.assertEqual("raw", default_view["cluster"])
+        self.assertEqual([], default_view["typed_edges"])
+        self.assertEqual("category_hub", hub_view["cluster"])
+        self.assertEqual(1, sum(1 for n in hub_view["nodes"] if n.get("node_type") == "hub"))
 
     def test_neighborhood_graph_is_bounded_and_distinguishes_edge_kinds(self):
         center = {"id": MEMORY_ID, "content": "Project:Center state=active [Tier=2]", "category": "project"}

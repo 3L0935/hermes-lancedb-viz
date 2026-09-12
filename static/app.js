@@ -419,6 +419,15 @@ function formatBytes(value) {
   return (bytes / (1024 * 1024)).toFixed(1) + ' MiB';
 }
 
+// Backup paths are long and the interesting part is at the end. Showing the full
+// absolute path inline pushed the rest of the panel around; the caller keeps the
+// complete path in a title attribute.
+function shortPath(path) {
+  const parts = String(path == null ? '' : path).split('/').filter(Boolean);
+  if (parts.length <= 2) return path || '';
+  return parts.slice(-2).join('/');
+}
+
 async function loadHealth() {
   const button = document.getElementById('health-scan');
   const container = document.getElementById('health-container');
@@ -464,12 +473,12 @@ async function loadCompactionPlan() {
     const plan = await fetch(API + '/maintenance/compact/plan').then(response => response.json());
     if (plan.error) throw new Error(plan.error);
     const deleted = (plan.backups_to_delete || []).length
-      ? (plan.backups_to_delete || []).map(path => '<li>' + escapeHtml(path) + '</li>').join('')
+      ? (plan.backups_to_delete || []).map(path => '<li><code>' + escapeHtml(shortPath(path)) + '</code></li>').join('')
       : '<li>None</li>';
     content.innerHTML =
       '<div class="compact-metrics"><span>Current <b>' + formatBytes(plan.size_before_bytes) + '</b></span><span>Estimated after <b>' + formatBytes(plan.estimated_after_bytes) + '</b></span></div>' +
-      '<p>Backup to create: <code>' + escapeHtml(plan.backup_to_create) + '</code></p>' +
-      '<p>Old managed backups to delete:</p><ul>' + deleted + '</ul>' +
+      '<p>Backup to create</p><ul class="compact-paths"><li><code title="' + escapeHtmlAttr(plan.backup_to_create || '') + '">' + escapeHtml(shortPath(plan.backup_to_create)) + '</code></li></ul>' +
+      '<p>Old managed backups to delete</p><ul class="compact-paths">' + deleted + '</ul>' +
       '<label class="compact-confirm"><input id="compact-confirm" type="checkbox" onchange="document.getElementById(\'compact-run\').disabled=!this.checked"> I paused other writers and confirm this maintenance action.</label>' +
       '<button id="compact-run" class="btn-neon btn-delete" onclick="runCompaction()" disabled>Compact database</button>' +
       '<pre id="compact-result" class="compact-result" hidden></pre>';

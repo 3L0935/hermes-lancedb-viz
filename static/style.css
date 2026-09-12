@@ -569,3 +569,6 @@ input[type=range] { height: 4px; accent-color: var(--indigo); cursor: pointer; }
 .compact-confirm { display:flex; align-items:flex-start; gap:8px; margin:12px 0; color:#cbd5e1; font-size:11px; line-height:1.5; cursor:pointer; }
 .compact-confirm > input { margin-top:2px; accent-color:var(--indigo); }
 .compact-result { max-height:260px; margin:12px 0 0; padding:11px 12px; overflow:auto; border:1px solid var(--border); border-left:3px solid var(--green); border-radius:7px; background:rgba(8,8,16,.85); color:#cbd5e1; font:10px 'Fira Code', monospace; white-space:pre-wrap; }
+.compact-paths { margin:0 0 6px; padding-left:0; list-style:none; }
+.compact-paths > li { margin-bottom:3px; }
+.compact-paths code { display:inline-block; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:bottom; }

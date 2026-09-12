@@ -630,15 +630,20 @@ def get_graph_data(
     threshold: float = 0.65,
     memory_id: str = "",
     relation_types: set[str] | None = None,
+    show_declared: bool = False,
 ) -> dict:
     """Return the whole memory graph by default, or one selected neighborhood.
 
-    With no ``memory_id`` this is the FULL graph: every memory as a node, linked
-    by vector similarity at the requested threshold. That is the intended default
-    view (the slider is the filter), and it is affordable: measured at the slider
-    default, 468 nodes and 372 edges serialize to about 414 KB in 0.17 s. The
-    payload stays proportional to the threshold, so raising it thins the graph
-    instead of hiding nodes.
+    With no ``memory_id`` this is the FULL graph. ``cluster`` selects the layout:
+    ``raw`` links memories by embedding similarity only, ``category_hub`` and
+    ``entity_hub`` add grouping hub nodes. Declared typed relations (``connects_to``,
+    ``part_of``, ...) are drawn only when ``show_declared`` is set, so the default
+    view stays the embedding structure rather than a typed-relation overlay.
+
+    The full view is affordable: measured at the slider default, 468 nodes and 372
+    similarity links serialize to about 414 KB in 0.17 s. The payload stays
+    proportional to the threshold, so raising it thins the graph instead of hiding
+    nodes.
     """
     if not memory_id:
         threshold = min(max(float(threshold), 0.0), 1.0)
@@ -652,35 +657,50 @@ def get_graph_data(
                 "budgets": {"nodes": GRAPH_MAX_NODES, "edges": GRAPH_MAX_EDGES,
                             "semantic_candidates": GRAPH_MAX_SEMANTIC_NEIGHBORS},
             }
-        nodes, edges, _, _, memories, _ = _compute_vector_data(store, threshold)
+        if cluster == "category_hub":
+            built = _build_category_hub_graph(store, threshold)
+            nodes = built["nodes"]
+            edges = built["edges"]
+        elif cluster == "entity_hub":
+            built = _build_entity_clustered_graph(store, threshold)
+            nodes = built["nodes"]
+            edges = built["edges"]
+        else:
+            nodes, edges, _, _, _, _ = _compute_vector_data(store, threshold)
+            for edge in edges:
+                edge.setdefault("kind", "semantic")
+
         by_id = {str(n["id"]): n for n in nodes}
         declared: list[dict] = []
-        try:
-            for relation in store.get_typed_edges(include_unresolved=True):
-                source = str(relation.get("from") or "")
-                target = str(relation.get("to") or "")
-                if source not in by_id or target not in by_id:
-                    continue
-                declared.append({
-                    "from": source,
-                    "to": target,
-                    "kind": "declared",
-                    "relation_type": str(relation.get("relation_type") or "linked"),
-                    "label": str(relation.get("relation_type") or "linked"),
-                    "directed": True,
-                })
-                by_id[source]["has_declared_relations"] = True
-                by_id[target]["has_declared_relations"] = True
-        except Exception:
-            pass
-        # _compute_vector_data emits untyped similarity edges (no `kind`), so
-        # tag them here rather than expecting the key downstream.
+        if show_declared:
+            try:
+                for relation in store.get_typed_edges(include_unresolved=True):
+                    source = str(relation.get("from") or "")
+                    target = str(relation.get("to") or "")
+                    if source not in by_id or target not in by_id:
+                        continue
+                    declared.append({
+                        "from": source,
+                        "to": target,
+                        "kind": "declared",
+                        "relation_type": str(relation.get("relation_type") or "linked"),
+                        "label": str(relation.get("relation_type") or "linked"),
+                        "directed": True,
+                    })
+                    by_id[source]["has_declared_relations"] = True
+                    by_id[target]["has_declared_relations"] = True
+            except Exception:
+                pass
+        # Similarity and hub edges carry no `kind`; tag them rather than expecting
+        # the key downstream.
         for edge in edges:
             edge.setdefault("kind", "semantic")
         edges = edges + declared
         return {
             "selection_required": False,
             "overview": True,
+            "cluster": cluster,
+            "show_declared": show_declared,
             "threshold": threshold,
             "total_nodes": len(nodes),
             "total_edges": len(edges),
@@ -1903,6 +1923,7 @@ class Handler(BaseHTTPRequestHandler):
             threshold = float(params.get("threshold", ["0.65"])[0])
             memory_id = params.get("memory_id", [""])[0]
             raw_relation_types = params.get("relation_types", [""])[0]
+            show_declared = params.get("show_declared", ["0"])[0] in ("1", "true", "yes")
             relation_types = {
                 value for value in raw_relation_types.split(",") if value
             } or None
@@ -1911,6 +1932,7 @@ class Handler(BaseHTTPRequestHandler):
                 threshold=threshold,
                 memory_id=memory_id,
                 relation_types=relation_types,
+                show_declared=show_declared,
             ))
         elif path == "/api/stats":
             self._send_json(get_stats())

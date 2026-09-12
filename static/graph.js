@@ -45,12 +45,16 @@ async function loadGraph() {
   document.getElementById('loading').style.display = 'block';
   const threshold = document.getElementById('threshold-slider')?.value || 0.8;
   const relationType = document.getElementById('relation-filter')?.value || '';
-  // No selection means the bounded overview, not an empty canvas. The server
-  // answers with the most connected memories and their strongest links.
+  const clusterMode = document.getElementById('cluster-mode')?.value || 'raw';
+  const showDeclared = document.getElementById('show-declared')?.checked ? '1' : '0';
+  // No selection means the full graph, not an empty canvas. The default mode is
+  // embedding similarity only; typed relations are an opt-in overlay, and the hub
+  // modes group nodes by category or entity.
   const query = selectedNodeId
     ? '/api/graph?memory_id=' + encodeURIComponent(selectedNodeId) +
       '&threshold=' + threshold + '&relation_types=' + encodeURIComponent(relationType)
-    : '/api/graph?threshold=' + threshold;
+    : '/api/graph?threshold=' + threshold + '&cluster=' + encodeURIComponent(clusterMode) +
+      '&show_declared=' + showDeclared;
   try {
     const resp = await fetch(query);
     allData = await resp.json();

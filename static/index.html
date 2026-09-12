@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/style.css?4">
 </head>
 <body>
 
@@ -244,7 +244,20 @@
             <option value="tech">Tech</option>
             <option value="correction">Corrections</option>
             <option value="fact">Facts</option>
+            <option value="insight">Insights</option>
+            <option value="decision">Decisions</option>
+            <option value="pattern">Patterns</option>
+            <option value="reference">References</option>
+            <option value="question">Questions</option>
           </select>
+          <select id="cluster-mode" onchange="closeSidebar();loadGraph()">
+            <option value="raw">Embedding links</option>
+            <option value="category_hub">By category (hubs)</option>
+            <option value="entity_hub">By entity (hubs)</option>
+          </select>
+          <label title="Overlay the declared typed relations on top of the embedding links">
+            <input type="checkbox" id="show-declared" onchange="closeSidebar();loadGraph()"> Typed relations
+          </label>
           <select id="relation-filter">
             <option value="">All declared relations</option>
             <option value="part_of">part_of</option><option value="depends">depends</option>
@@ -290,9 +303,9 @@
   </div>
 </div>
 
-<script src="/static/vis-network.min.js?3"></script>
-<script src="/static/graph.js?3"></script>
-<script src="/static/app.js?3"></script>
+<script src="/static/vis-network.min.js?4"></script>
+<script src="/static/graph.js?4"></script>
+<script src="/static/app.js?4"></script>
 
 </body>
 </html>
